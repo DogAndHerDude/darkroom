@@ -3,6 +3,8 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use darkroom_core::raf;
+use darkroom_render::Source;
 use image::{DynamicImage, ImageDecoder, ImageReader, imageops::FilterType};
 
 /// The longest edge of the preview the develop pass runs on. Full resolution is for 100% zoom
@@ -14,11 +16,66 @@ pub struct Photo {
     pub id: u64,
     pub name: String,
     pub size: [u32; 2],
-    /// sRGB RGBA8, tightly packed.
-    pub rgba: Vec<u8>,
+    pub pixels: Pixels,
     /// Counts of each encoded value, 0..=255: luminance, red, green, blue. Of the unedited
     /// photo for now; the live histogram of the edit needs a GPU readback.
     pub histogram: [[u32; 256]; 4],
+}
+
+/// A photo's pixels, RGBA and tightly packed.
+pub enum Pixels {
+    /// sRGB-encoded, 8 bits per channel: a JPEG or PNG.
+    Srgb8(Vec<u8>),
+    /// Linear sRGB-primary light as half floats: a developed raw file.
+    LinearHalf(Vec<u16>),
+}
+
+impl Pixels {
+    pub fn source(&self) -> Source<'_> {
+        match self {
+            Pixels::Srgb8(v) => Source::Srgb8(v),
+            Pixels::LinearHalf(v) => Source::LinearHalf(v),
+        }
+    }
+
+    /// From a decoded image: float images (raw files) stay linear and keep their precision.
+    pub fn from_image(img: DynamicImage) -> ([u32; 2], Pixels) {
+        let size = [img.width(), img.height()];
+        let pixels = match img {
+            DynamicImage::ImageRgb32F(f) => {
+                let half = |v: f32| half::f16::from_f32(v.max(0.0)).to_bits();
+                Pixels::LinearHalf(f.pixels().flat_map(|p| [half(p[0]), half(p[1]), half(p[2]), half(1.0)]).collect())
+            }
+            other => Pixels::Srgb8(other.into_rgba8().into_raw()),
+        };
+        (size, pixels)
+    }
+
+    fn histogram(&self) -> [[u32; 256]; 4] {
+        match self {
+            Pixels::Srgb8(rgba) => histogram(rgba),
+            Pixels::LinearHalf(rgba) => {
+                let encode = |b: u16| {
+                    let v = half::f16::from_bits(b).to_f32().clamp(0.0, 1.0);
+                    ((if v <= 0.0031308 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }) * 255.0 + 0.5) as u8
+                };
+                histogram(&rgba.iter().map(|&b| encode(b)).collect::<Vec<u8>>())
+            }
+        }
+    }
+}
+
+/// Decodes a photo upright at full size: a JPEG or PNG as it is, a RAF developed to a linear
+/// float image.
+pub fn decode(path: &Path) -> Result<DynamicImage, String> {
+    if raf::is_raf(path) {
+        return crate::raw::develop(path);
+    }
+    let mut decoder = ImageReader::open(path).and_then(|r| r.with_guessed_format()).map_err(|e| e.to_string())?.into_decoder().map_err(|e| e.to_string())?;
+    let orientation = decoder.orientation().map_err(|e| e.to_string())?;
+    let mut img = DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
+    img.apply_orientation(orientation);
+    Ok(img)
 }
 
 fn histogram(rgba: &[u8]) -> [[u32; 256]; 4] {
@@ -40,20 +97,15 @@ fn next_id() -> u64 {
 }
 
 impl Photo {
-    /// Decodes a JPEG or PNG, applies its EXIF orientation and scales it to preview size.
-    pub fn open(path: &str) -> Result<Photo, image::ImageError> {
-        let mut decoder = ImageReader::open(path)?.with_guessed_format()?.into_decoder()?;
-        let orientation = decoder.orientation()?;
-        let mut img = DynamicImage::from_decoder(decoder)?;
-        img.apply_orientation(orientation);
+    /// Decodes a photo and scales it to preview size.
+    pub fn open(path: &str) -> Result<Photo, String> {
+        let mut img = decode(Path::new(path))?;
         if img.width().max(img.height()) > PREVIEW_EDGE {
             img = img.resize(PREVIEW_EDGE, PREVIEW_EDGE, FilterType::Triangle);
         }
-        let rgba = img.into_rgba8();
         let name = Path::new(path).file_name().map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned());
-        let size = [rgba.width(), rgba.height()];
-        let rgba = rgba.into_raw();
-        Ok(Photo { id: next_id(), name, size, histogram: histogram(&rgba), rgba })
+        let (size, pixels) = Pixels::from_image(img);
+        Ok(Photo { id: next_id(), name, size, histogram: pixels.histogram(), pixels })
     }
 
     /// A 3:2 chart to judge the adjustments by without a photo: a grey ramp across the top half,
@@ -78,7 +130,7 @@ impl Photo {
                 rgba.extend_from_slice(&[(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8, 255]);
             }
         }
-        Photo { id: next_id(), name: "Test chart".into(), size: [w, h], histogram: histogram(&rgba), rgba }
+        Photo { id: next_id(), name: "Test chart".into(), size: [w, h], histogram: histogram(&rgba), pixels: Pixels::Srgb8(rgba) }
     }
 }
 

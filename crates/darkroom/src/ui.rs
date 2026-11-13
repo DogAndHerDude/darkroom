@@ -98,5 +98,9 @@ pub fn top_bar(s: &State, title: String, right: El) -> El {
         .child(text(title).font(t::BODY_STRONG).color(t::INK))
         .child(spacer())
         .child(right)
-        .child(button("export", "Export…", |s| s.export_scope = Some(crate::export::Scope::Shown)))
+        .child(button("export", "Export…", |s| {
+            // The open photo from Develop; the grid from the Library.
+            let one = s.module == Module::Develop && s.target().is_some();
+            s.export_scope = Some(if one { crate::export::Scope::One } else { crate::export::Scope::Shown });
+        }))
 }

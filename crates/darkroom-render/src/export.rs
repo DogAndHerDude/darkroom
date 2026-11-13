@@ -115,7 +115,7 @@ impl Develop {
         // Put the strips back together as they arrive; the last one in finishes the image.
         let count = strips.len();
         let parts: Arc<Mutex<Vec<Option<Vec<u8>>>>> = Arc::new(Mutex::new(vec![None; count]));
-        let done: Arc<Mutex<Option<Box<dyn FnOnce(Result<Exported, String>) + Send>>>> = Arc::new(Mutex::new(Some(Box::new(done))));
+        let done: Arc<Mutex<Option<Done>>> = Arc::new(Mutex::new(Some(Box::new(done))));
         for (i, (_, rows, readback)) in strips.into_iter().enumerate() {
             let (parts, done) = (parts.clone(), done.clone());
             readback.start(device, move |bytes| {
@@ -138,7 +138,7 @@ impl Develop {
                 if parts.iter().all(Option::is_some) {
                     let mut rgba16f = Vec::with_capacity((out[0] * out[1] * 4) as usize);
                     for part in parts.iter_mut() {
-                        rgba16f.extend(part.take().unwrap_or_default().chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])));
+                        rgba16f.extend(part.take().unwrap_or_default().as_chunks::<2>().0.iter().map(|b| u16::from_le_bytes(*b)));
                     }
                     drop(parts);
                     finish(Ok(Exported { size: out, rgba16f }));
@@ -147,3 +147,5 @@ impl Develop {
         }
     }
 }
+
+type Done = Box<dyn FnOnce(Result<Exported, String>) + Send>;

@@ -1,7 +1,7 @@
 //! The EXIF fields the library shows, read from a photo's header.
 
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Cursor};
 use std::path::Path;
 
 use exif::{In, Tag, Value};
@@ -23,8 +23,13 @@ pub struct Exif {
 impl Exif {
     /// The photo's EXIF, or an empty one when it has none or can't be read.
     pub fn read(path: &Path) -> Exif {
-        let Ok(file) = File::open(path) else { return Exif::default() };
-        let Ok(data) = exif::Reader::new().read_from_container(&mut BufReader::new(file)) else { return Exif::default() };
+        // A RAF's EXIF is in the JPEG the camera embedded.
+        let read = if crate::raf::is_raf(path) {
+            crate::raf::embedded_jpeg(path).and_then(|jpeg| exif::Reader::new().read_from_container(&mut Cursor::new(jpeg)).ok())
+        } else {
+            File::open(path).ok().and_then(|file| exif::Reader::new().read_from_container(&mut BufReader::new(file)).ok())
+        };
+        let Some(data) = read else { return Exif::default() };
         let field = |tag| data.get_field(tag, In::PRIMARY).map(|f| &f.value);
         let text = |tag| field(tag).and_then(ascii);
         let make = text(Tag::Make);

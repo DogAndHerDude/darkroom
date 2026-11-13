@@ -13,11 +13,11 @@ use std::time::SystemTime;
 
 use darkroom_core::exif::Exif;
 use darkroom_core::library::{self, Entry, Folder};
-use darkroom_core::{Edit, sidecar};
-use image::{DynamicImage, ImageDecoder, ImageReader};
+use darkroom_core::{Edit, raf, sidecar};
+use image::DynamicImage;
 use rune::Waker;
 
-use crate::photo::Photo;
+use crate::photo::{self, Photo, Pixels};
 
 /// The long edge of a thumbnail, in pixels: sharp at the largest grid size on a Retina screen.
 const THUMB_EDGE: u32 = 448;
@@ -37,7 +37,7 @@ pub enum Msg {
 pub struct Prepared {
     pub path: PathBuf,
     pub size: [u32; 2],
-    pub rgba: Vec<u8>,
+    pub pixels: Pixels,
     pub edit: Edit,
 }
 
@@ -149,7 +149,7 @@ impl Jobs {
     /// Opens a photo for Develop: decodes its preview and reads its edit.
     pub fn open(&self, path: PathBuf) {
         self.spawn("open", move || {
-            let result = Photo::open(&path.to_string_lossy()).map_err(|e| e.to_string()).and_then(|photo| {
+            let result = Photo::open(&path.to_string_lossy()).and_then(|photo| {
                 let edit = sidecar::load(&path).map_err(|e| format!("its edit file is unreadable: {e}"))?;
                 Ok(Box::new((photo, edit)))
             });
@@ -160,10 +160,7 @@ impl Jobs {
 
 fn prepare(path: &Path, long_edge: Option<u32>) -> Result<Prepared, String> {
     let edit = sidecar::load(path).map_err(|e| format!("its edit file is unreadable: {e}"))?;
-    let mut decoder = ImageReader::open(path).and_then(|r| r.with_guessed_format()).map_err(|e| e.to_string())?.into_decoder().map_err(|e| e.to_string())?;
-    let orientation = decoder.orientation().map_err(|e| e.to_string())?;
-    let mut img = DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
-    img.apply_orientation(orientation);
+    let mut img = photo::decode(path)?;
     let full = [img.width(), img.height()];
     if let Some(limit) = long_edge {
         // Scale so the output (after crop) has the long edge asked for; never enlarge.
@@ -174,8 +171,19 @@ fn prepare(path: &Path, long_edge: Option<u32>) -> Result<Prepared, String> {
             img = img.resize_exact(w, h, image::imageops::FilterType::CatmullRom);
         }
     }
-    let rgba = img.into_rgba8();
-    Ok(Prepared { path: path.to_owned(), size: [rgba.width(), rgba.height()], rgba: rgba.into_raw(), edit })
+    let (size, pixels) = Pixels::from_image(img);
+    Ok(Prepared { path: path.to_owned(), size, pixels, edit })
+}
+
+/// The JPEG inside a RAF, decoded upright.
+fn embedded(path: &Path) -> Option<DynamicImage> {
+    use image::ImageDecoder;
+    let jpeg = raf::embedded_jpeg(path)?;
+    let mut decoder = image::ImageReader::new(std::io::Cursor::new(jpeg)).with_guessed_format().ok()?.into_decoder().ok()?;
+    let orientation = decoder.orientation().ok()?;
+    let mut img = DynamicImage::from_decoder(decoder).ok()?;
+    img.apply_orientation(orientation);
+    Some(img)
 }
 
 fn deliver(inbox: &Mutex<Vec<Msg>>, waker: &Mutex<Option<Waker>>, msg: Msg) {
@@ -236,10 +244,8 @@ fn thumbnail(path: &Path) -> Option<(u32, u32, Vec<u8>)> {
         let rgba = img.into_rgba8();
         return Some((rgba.width(), rgba.height(), rgba.into_raw()));
     }
-    let mut decoder = ImageReader::open(path).ok()?.with_guessed_format().ok()?.into_decoder().ok()?;
-    let orientation = decoder.orientation().ok()?;
-    let mut img = DynamicImage::from_decoder(decoder).ok()?;
-    img.apply_orientation(orientation);
+    // A RAF's thumbnail is the JPEG the camera embedded: far quicker than developing it.
+    let img = if raf::is_raf(path) { embedded(path)? } else { photo::decode(path).ok()? };
     let small = img.thumbnail(THUMB_EDGE, THUMB_EDGE).into_rgb8();
     if let Some(c) = cached {
         let _ = std::fs::create_dir_all(cache_dir());

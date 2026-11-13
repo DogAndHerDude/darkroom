@@ -9,7 +9,7 @@ use crate::Flag;
 use crate::exif::Exif;
 
 /// File types the library lists (lowercase).
-pub const PHOTO_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png"];
+pub const PHOTO_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "raf"];
 
 pub fn is_photo(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| PHOTO_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn photos_are_recognised_by_extension_in_any_case() {
         assert!(is_photo(Path::new("DSCF4127.JPG")) && is_photo(Path::new("a.jpeg")) && is_photo(Path::new("b.png")));
-        assert!(!is_photo(Path::new("DSCF4127.JPG.darkroom")) && !is_photo(Path::new("DSCF4127.RAF")));
+        assert!(!is_photo(Path::new("DSCF4127.JPG.darkroom")) && is_photo(Path::new("DSCF4127.RAF")));
     }
 
     #[test]

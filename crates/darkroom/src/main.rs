@@ -12,6 +12,7 @@ mod export;
 mod jobs;
 mod library;
 mod photo;
+mod raw;
 mod theme;
 mod ui;
 
@@ -565,7 +566,7 @@ impl Compositor<State> for Preview {
                 let mut gpu = Develop::new(f.device, Arc::new(Results::default()), Arc::new(|| {}));
                 gpu.histogram_enabled = false;
                 gpu.display_p3 = settings.display_p3;
-                gpu.set_photo(f.device, f.queue, u64::MAX - index as u64, prepared.size, &prepared.rgba);
+                gpu.set_photo(f.device, f.queue, u64::MAX - index as u64, prepared.size, prepared.pixels.source());
                 gpu.update(f.device, f.queue, &prepared.edit);
                 let g = &prepared.edit.geometry;
                 let (map, out) = (g.output_to_source(prepared.size), g.output_size(prepared.size));
@@ -580,7 +581,7 @@ impl Compositor<State> for Preview {
         let s = &mut f.rt.state;
         if s.module == Module::Develop {
             if develop.photo_id() != Some(s.photo.id) {
-                develop.set_photo(f.device, f.queue, s.photo.id, s.photo.size, &s.photo.rgba);
+                develop.set_photo(f.device, f.queue, s.photo.id, s.photo.size, s.photo.pixels.source());
             }
             if let Some((id, pixel)) = s.probe_request.take() {
                 develop.probe(id, pixel);

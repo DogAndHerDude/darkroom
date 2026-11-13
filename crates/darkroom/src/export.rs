@@ -10,6 +10,7 @@ use std::io::{BufReader, BufWriter, Cursor};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use darkroom_core::raf;
 use darkroom_render::Exported;
 use image::{ExtendedColorType, ImageEncoder};
 use rune::{El, FileDialogOptions, Tx, col, el, row, spacer, text};
@@ -67,6 +68,15 @@ impl Settings {
             let name = folder.and_then(|f| f.file_name()).map_or_else(|| "Export".into(), |n| n.to_string_lossy().into_owned());
             pictures.join("Darkroom").join(name)
         })
+    }
+}
+
+/// `path` for showing: the home folder as `~`.
+fn tilde(path: &Path) -> String {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    match home.and_then(|h| path.strip_prefix(h).ok().map(|rest| Path::new("~").join(rest))) {
+        Some(short) => short.display().to_string(),
+        None => path.display().to_string(),
     }
 }
 
@@ -129,7 +139,12 @@ fn tables() -> &'static (Vec<u8>, Vec<u16>) {
 /// already upright).
 fn camera_exif(source: &Path) -> Option<Vec<u8>> {
     use exif::{In, Tag};
-    let data = exif::Reader::new().read_from_container(&mut BufReader::new(File::open(source).ok()?)).ok()?;
+    // A RAF keeps its EXIF in the JPEG the camera embedded.
+    let data = if raf::is_raf(source) {
+        exif::Reader::new().read_from_container(&mut Cursor::new(raf::embedded_jpeg(source)?)).ok()?
+    } else {
+        exif::Reader::new().read_from_container(&mut BufReader::new(File::open(source).ok()?)).ok()?
+    };
     const KEEP: [Tag; 11] = [
         Tag::Make,
         Tag::Model,
@@ -264,9 +279,14 @@ fn settings_view(s: &State, scope: Scope) -> El {
     let count = s.export_paths(scope).len();
     let title = if count == 1 { "Export 1 photo".to_owned() } else { format!("Export {count} photos") };
     let destination = x.destination_for(s.folder.as_deref());
-    let mut body = col()
-        .w_full()
-        .gap(14.0)
+    let mut body = col().w_full().gap(14.0);
+    // Offered when there is both an open or selected photo and more than it in the grid.
+    let (one, shown) = (s.export_paths(Scope::One).len(), s.export_paths(Scope::Shown).len());
+    if one == 1 && shown > 1 {
+        let all = if s.filter == Default::default() { "All in folder" } else { "All shown" };
+        body = body.child(field("Photos", segmented("scope", &[(Scope::One, "This photo"), (Scope::Shown, all)], scope, |s, v| s.export_scope = Some(v))));
+    }
+    body = body
         .child(field("Format", segmented("format", &[(Format::Jpeg, "JPEG"), (Format::Png, "PNG"), (Format::Tiff, "TIFF")], x.format, |s, f| s.export_settings.format = f)));
     if x.format == Format::Jpeg {
         body = body.child(field(
@@ -284,7 +304,7 @@ fn settings_view(s: &State, scope: Scope) -> El {
                 .gap(8.0)
                 .shrink()
                 .center_y()
-                .child(text(destination.display().to_string()).font(t::VALUE_SM).color(t::INK).truncate_fade().shrink())
+                .child(text(tilde(&destination)).font(t::VALUE_SM).color(t::INK).truncate_fade().shrink())
                 .child(
                     el().key("choose-destination")
                         .role("button")
@@ -306,7 +326,7 @@ fn settings_view(s: &State, scope: Scope) -> El {
                         .child(text("Choose…").font(t::BODY).color(t::INK)),
                 ),
         ));
-    let note = if x.format == Format::Tiff { "16 bits per channel. Camera info is written to JPEG and PNG only." } else { "Location is never included." };
+    let note = if x.format == Format::Tiff { "16 bits per channel, without camera info." } else { "Location is never included." };
     let footer = row()
         .w_full()
         .gap(8.0)
@@ -328,7 +348,7 @@ fn progress(run: &Run) -> El {
     };
     let frac = done as f32 / total.max(1) as f32;
     let bar = el().w_full().h(4.0).radius(2.0).fill(t::BG_ACTIVE).child(el().absolute(0.0, 0.0).h(4.0).radius(2.0).w_frac(frac).fill(t::ACCENT));
-    let mut c = col().w_full().gap(16.0).child(text(title).font(t::DISPLAY).color(t::INK)).child(bar).child(text(run.destination.display().to_string()).font(t::VALUE_SM).color(t::INK_MUTED));
+    let mut c = col().w_full().gap(16.0).child(text(title).font(t::DISPLAY).color(t::INK)).child(bar).child(row().w_full().child(text(tilde(&run.destination)).font(t::VALUE_SM).color(t::INK_MUTED).truncate_fade().shrink()));
     for f in &run.failed {
         c = c.child(text(f.clone()).font(t::CAPTION).color(t::DANGER_INK));
     }
@@ -372,7 +392,7 @@ mod tests {
         let at = |v: f32| half::f16::from_f32(v).to_bits() as usize;
         assert_eq!(eight[at(0.0)], 0);
         assert_eq!(eight[at(1.0)], 255);
-        assert_eq!(eight[at(0.214)], 128, "linear 0.214 is about middle grey encoded");
+        assert_eq!(eight[at(0.2159)], 128, "linear 0.216 is middle grey encoded");
         assert_eq!(sixteen[at(1.0)], 65535);
         assert_eq!(eight[at(-0.5)], 0, "negatives clamp");
     }

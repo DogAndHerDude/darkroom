@@ -34,21 +34,23 @@ Phase: **implementation.** Spec, design system and initial screens are done.
 | Ratings and flags | Working, in the Library and Develop (keys 0–5, P, X, U) |
 | Filmstrip in Develop | Working |
 | First launch: choose a folder (remembered) | Working |
-| Crop, straighten, rotate, flip | Stored in the edit; not applied yet |
-| Export, RAF | Not started |
+| Crop, straighten, rotate, flip | Working: Crop tool in Develop (C), applied in the preview and in export |
+| Export: JPEG, PNG, 16-bit TIFF; resize; sRGB or Display P3; camera info | Working: one photo or everything the grid shows, with progress |
+| RAF (Fujifilm raw) | Working: developed with `rawler`; see "RAF" for what the starting look is and isn't |
 
 ## Running
 
 ```sh
 cargo run -p darkroom                            # the folder chosen last time, or asks for one
 cargo run -p darkroom -- path/to/folder          # browse a folder (not remembered)
-cargo run -p darkroom -- path/to/photo.jpg       # open a photo in Develop
+cargo run -p darkroom -- path/to/photo.jpg       # open a photo in Develop (or a .RAF)
 cargo run -p darkroom -- --snap out.png --scene edited   # headless snapshot, no window
 # DARKROOM_NO_PREFS=1 ignores saved settings (root folder, thumbnail size), for tests
-# Develop scenes on the test chart: develop, edited, curves, curve-red, extreme, warm, hidden, definition, sharpen, denoise
+# Develop scenes on the test chart: develop, edited, curves, curve-red, extreme, warm, hidden, definition, sharpen, denoise, crop, cropped
 # (the detail scenes need a photo with texture and noise to show anything)
 # the panel scrolls; for the Curves section in a snapshot add --size 1280x1500
-# drive it: --script events.json (clicks and drags in window points)
+# drive it: --script events.json (clicks and drags in window points, or "key": an element's key)
+# script time is virtual: background work (export, raw decoding) needs a late last event to finish in
 cargo test --workspace
 ```
 
@@ -59,7 +61,7 @@ The toolchain is pinned to Rust 1.99.1 (RUNE's), so rustup installs it on the fi
 | Crate | What |
 | --- | --- |
 | `crates/darkroom` | The app: RUNE UI, state, and the `Preview` compositor that draws the photo |
-| `crates/darkroom-core` | The edit model (`Edit`), monotone cubic curves, and edit-file load/save. No GPU or UI |
+| `crates/darkroom-core` | The edit model (`Edit`), monotone cubic curves, geometry (crop and straighten as one affine map), edit-file load/save, the library scan, EXIF, and the RAF header. No GPU or UI |
 | `crates/darkroom-render` | GPU develop pipeline: `Params::from_edit`, the develop compute pass (`develop.wgsl`) into an `Rgba16Float` texture, and the present pass that draws it into a render pass |
 
 ## Processing pipeline
@@ -110,6 +112,35 @@ Edit files are `<photo name>.darkroom` (`DSCF4127.JPG.darkroom`, TOML inside), s
 
 RUNE is pinned to a `dev` rev in the root `Cargo.toml`, with the four crates RUNE patches patched from the same rev. Bump all five together. `wgpu` is pinned to RUNE's version (`~30.0.1`) so our resources live on RUNE's device.
 
+## Crop and straighten
+
+`Geometry` in the edit holds the crop (a rectangle in the upright photo, 0–1), the straighten angle (±45°), quarter turns and flips. `darkroom-core/src/geometry.rs` turns it into one affine map from output position to source position. The preview (`present.wgsl`) and export (`export.wgsl`) both sample the developed photo through that map, so they can't disagree.
+
+Straightening always crops to the largest rectangle of the chosen aspect that stays inside the rotated photo. Dragging the crop frame can't leave the photo either: a drag that would is cut short along its path, one axis at a time, so the frame slides along the edge.
+
+## Export
+
+The "Export…" button exports the open photo from Develop, or everything the grid shows from the Library; the dialog switches between the two. Settings are remembered.
+
+| Setting | Options |
+| --- | --- |
+| Format | JPEG (quality 70–100), PNG (8-bit), TIFF (16-bit) |
+| Long edge | Full size, 4000, 3000 or 2048 px; never enlarges |
+| Colour space | sRGB or Display P3, with the macOS ICC profile embedded |
+| Metadata | Camera, lens, exposure and capture time (JPEG and PNG). Location is never written, and neither is orientation: the pixels are already upright |
+| Save to | `~/Pictures/Darkroom/<folder name>` unless another folder is chosen |
+
+How it runs: one photo at a time. A background thread decodes the full image and reads its edit; the next frame develops it on the GPU in a temporary `Develop` at full size and reads the result back in strips of at most 64 MB (`darkroom-render/src/export.rs`); a thread encodes the file. Files are written as `.partial` and renamed, and an existing name gets ` (2)`, so nothing is overwritten.
+
+## RAF
+
+`crates/darkroom/src/raw.rs` develops a RAF with [`rawler`](https://crates.io/crates/rawler) (LGPL-2.1): black and white levels, demosaicing, the camera's white balance and colour matrix. X-Trans sensors use rawler's Markesteijn demosaic, which rawler's own develop path doesn't use (it's bilinear and visibly softer). The result goes to the GPU as linear half floats (`Source::LinearHalf`) where a JPEG goes as 8-bit sRGB, so highlights and shadows have real latitude.
+
+- **Starting look:** sensor data is about a stop darker than the camera's JPEG. A fixed base tone (gain 1.8 with a soft shoulder over 0.7, on luminance) brings it level. The numbers come from one X-T4 sample against its embedded JPEG. There is no film simulation, so a RAF starts flatter and less saturated than the JPEG.
+- **Thumbnails and EXIF** come from the JPEG the camera embeds in every RAF (`darkroom-core/src/raf.rs`), so the grid shows the camera's rendering, not Darkroom's.
+- **Speed:** a 26 MP RAF takes a few seconds to open in a debug build. Each open develops it again; nothing is cached.
+- **rawler in debug builds:** its demosaic relies on wrapping arithmetic, so the root `Cargo.toml` turns overflow checks off for that one package.
+
 ## Library
 
 - **No catalog:** the library is a root folder, chosen on first launch and remembered in RUNE's `Prefs`.
@@ -125,6 +156,7 @@ RUNE is pinned to a `dev` rev in the root `Cargo.toml`, with the four crates RUN
   | Return | Open the selected photo in Develop |
   | G or Esc | Back to the Library |
   | D | Develop |
+  | C | Crop tool on and off (Develop) |
 
 ## Preview path (decided by the spike)
 
@@ -180,7 +212,7 @@ Design column: ✅ designed on the canvas · ◐ partly designed · ✗ not desi
 | Presets | ✗ | Not designed |
 | Export: format, quality, sRGB/P3, resize, metadata, destination, naming, batch | ✅ | Export dialog |
 | First launch / empty library | ✅ | |
-| RAF (RAW) support | ✗ | Last in line for v1 |
+| RAF (RAW) support | ✗ | Built; no RAF-specific UI |
 
 ## Still missing
 
@@ -192,8 +224,8 @@ Design column: ✅ designed on the canvas · ◐ partly designed · ✗ not desi
 - Presets: list, save, apply
 - Paste edits with a choice of sections
 - White balance picker in use on the photo
-- Export progress, export finished and export failed states (Alert component)
-- Error and warning states: unreadable file, missing folder or drive, RAF not supported yet
+- Export progress, finished and failed states: built without a design (a plain dialog); wants the Alert component
+- Error and warning states: unreadable file, missing folder or drive
 - RAF-specific UI: true white balance in Kelvin and anything decoder-specific
 - Keyboard shortcut list
 - Settings, if any are needed (default export folder, cache location)
@@ -206,8 +238,13 @@ Design column: ✅ designed on the canvas · ◐ partly designed · ✗ not desi
 - [ ] **Exposure headroom.** Values brighter than white survive until output but are then mapped into SDR. Pulling an overexposed photo down already works; an EDR preview would need a float display path.
 - [ ] **Design tokens:** `crates/darkroom/src/theme.rs` is converted by hand from `tokens.json` for now; replace it with a build-time generated module.
 - [ ] **Fonts:** bundle Rubik and DM Mono. The design system ships `.woff2`; check whether RUNE's font stack loads WOFF2 or needs TTF/OTF.
-- [ ] **Full-resolution path:** the spike develops a 2560 px preview only. 100% zoom and export need the full image, likely in tiles.
-- [ ] **RAF decoder:** which Rust crate handles X-Trans demosaicing well.
+- [x] **Full-resolution path for export:** whole image on the GPU, read back in strips. 100% zoom in the preview is still to do.
+- [x] **RAF decoder:** `rawler`, with its Markesteijn demosaic for X-Trans.
+- [ ] **RAF look:** no film simulation and a base tone fitted to one sample. Wants checking against real files from the camera in use; a per-film-simulation curve, or reading the camera's settings from the MakerNote, would close the gap to the JPEG.
+- [ ] **RAF speed:** cache the developed preview, or show the embedded JPEG first and swap when the raw is ready.
+- [ ] **RAF hot pixels:** isolated bright pixels show at 100% (the camera maps them out; nothing here does yet).
+- [ ] **RAF + JPEG pairs:** both show in the grid as separate photos. An option to stack or hide one would tidy that.
+- [ ] **Export of the embedded capture time:** written to EXIF but not checked in other apps yet. Camera info isn't written to TIFF.
 - [x] **Adjustment order:** as in "Processing pipeline"; curves run on display channels.
 - [x] **Sidecar name and format:** `DSCF1234.JPG.darkroom`, TOML inside (matches the Library screen's "a .darkroom file").
 - [x] **GPU readback:** see "Reading results back from the GPU".
@@ -215,11 +252,11 @@ Design column: ✅ designed on the canvas · ◐ partly designed · ✗ not desi
 - [ ] **Fuji film simulation in the info panel:** needs reading Fujifilm's MakerNote. Wants a real file to check the tag numbers against.
 - [ ] **Thumbnail speed on real 40 MP files:** untested here (the test library is 1800 px JPEGs). The first visit decodes every full image once; the cache makes later visits instant.
 - [ ] **Sparse edit files:** a rating alone writes the whole edit (every field at its default). Writing only non-default fields would keep the files readable.
-- [ ] **Library details still to build:** multi-select, Export from the Library, offline-original warnings, folder watching (new photos appear only after reopening the folder).
+- [ ] **Library details still to build:** multi-select (export is one photo or all shown, nothing between), offline-original warnings, folder watching (new photos appear only after reopening the folder).
 - [ ] **Gamut edge in pure blues:** pure, fully saturated sRGB blues show a hard step once saturation or vibrance pushes them out of gamut. It's visible on the test chart's blue ramp even at +10 / +24, and as a hard azure-to-blue edge at extremes. Oklab's hue isn't constant around blue, which is a likely cause. Must be fixed before export; deep skies can get close.
 - [ ] **Definition halos:** Definition compares against a Gaussian blur, so strong values leave a light or dark rim along high-contrast edges (visible at 70 around a dark shape on sky). An edge-aware base (guided filter or bilateral pyramid) would remove it. The same base would serve local Brilliance, Highlights and Shadows.
 - [ ] **Sharpening on noisy photos:** sharpening still raises noise in flat areas (measured sd 7 → 11 at 80 on the noisy test image). A masking control, as Lightroom has, or pairing with noise reduction, would help.
-- [ ] **Detail at preview size:** the detail radii are in preview pixels (2560 px long edge). Export at full resolution must scale them, or sharpening and noise reduction will look weaker there.
+- [ ] **Detail at preview size:** sharpening and noise-reduction radii are in pixels of whatever is being developed. Export doesn't scale them yet, so at full resolution they act on finer detail than the 2560 px preview shows and look weaker. Definition scales with the image and is unaffected.
 - [ ] **Detail timing:** not measured yet. Noise reduction is 81 taps per pixel and the most expensive pass; if dragging feels slow on a full preview, run detail at a lower resolution while the pointer is down.
 - [ ] **Picker hover readout:** the design shows the pixel's values next to the cursor while picking. Needs a probe on pointer move.
 - [x] **Working colour space and precision:** linear Rec.2020, f32 in the shader, `Rgba16Float` between passes.

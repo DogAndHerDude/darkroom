@@ -317,9 +317,14 @@ impl Develop {
         self.photo.as_ref().map(|p| p.id)
     }
 
-    /// Uploads a photo (tightly packed sRGB RGBA8) and makes its working texture.
-    pub fn set_photo(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, id: u64, size: [u32; 2], rgba: &[u8]) {
-        assert_eq!(rgba.len(), (size[0] * size[1] * 4) as usize, "rgba is width × height × 4 bytes");
+    /// Uploads a photo (tightly packed RGBA) and makes its working texture.
+    pub fn set_photo(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, id: u64, size: [u32; 2], pixels: Source<'_>) {
+        // Either way the shader loads linear sRGB-primary values: the *Srgb format decodes.
+        let (format, bytes, texel): (_, &[u8], u32) = match pixels {
+            Source::Srgb8(rgba) => (wgpu::TextureFormat::Rgba8UnormSrgb, rgba, 4),
+            Source::LinearHalf(rgba) => (wgpu::TextureFormat::Rgba16Float, bytemuck::cast_slice(rgba), 8),
+        };
+        assert_eq!(bytes.len(), (size[0] * size[1] * texel) as usize, "pixels are width × height × 4 channels");
         let quarter = [size[0].div_ceil(4), size[1].div_ceil(4)];
         let extent = |[width, height]: [u32; 2]| wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
         let texture = |label, at: [u32; 2], format, usage| {
@@ -334,11 +339,11 @@ impl Develop {
                 view_formats: &[],
             })
         };
-        let source = texture("photo source", size, wgpu::TextureFormat::Rgba8UnormSrgb, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
+        let source = texture("photo source", size, format, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
         queue.write_texture(
             source.as_image_copy(),
-            rgba,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(size[0] * 4), rows_per_image: Some(size[1]) },
+            bytes,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(size[0] * texel), rows_per_image: Some(size[1]) },
             extent(size),
         );
         let float = |label, at| texture(label, at, WORKING_FORMAT, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING).create_view(&Default::default());
@@ -489,7 +494,7 @@ impl Develop {
             self.histogram_readback.start(device, move |bytes| {
                 let Some(bytes) = bytes else { return };
                 // Read by value: a byte Vec isn't guaranteed to be aligned for u32.
-                let counts: Vec<u32> = bytes.chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+                let counts: Vec<u32> = bytes.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)).collect();
                 if debug() {
                     let total: u64 = counts[..256].iter().map(|&c| c as u64).sum();
                     eprintln!("darkroom: histogram readback, {} bytes, {total} pixels", bytes.len());
@@ -509,7 +514,7 @@ impl Develop {
             let (results, wake) = (self.results.clone(), self.wake.clone());
             self.probe_readback.start(device, move |bytes| {
                 let Some(bytes) = bytes else { return };
-                let v: Vec<f32> = bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+                let v: Vec<f32> = bytes.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect();
                 if debug() {
                     eprintln!("darkroom: probe readback {v:?}");
                 }
@@ -584,6 +589,15 @@ pub fn definition_sigma(quarter: [u32; 2]) -> f32 {
 /// `DARKROOM_DEBUG=1` prints what readbacks return.
 fn debug() -> bool {
     std::env::var_os("DARKROOM_DEBUG").is_some()
+}
+
+/// A photo's pixels as the pipeline takes them, RGBA and tightly packed.
+#[derive(Clone, Copy)]
+pub enum Source<'a> {
+    /// sRGB-encoded, 8 bits per channel: a JPEG or PNG.
+    Srgb8(&'a [u8]),
+    /// Linear sRGB-primary light as half floats: a developed raw file.
+    LinearHalf(&'a [u16]),
 }
 
 /// `size` scaled to fit inside `rect` and centred in it, snapped to whole pixels.

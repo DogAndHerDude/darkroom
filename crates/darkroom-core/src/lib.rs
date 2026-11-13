@@ -9,6 +9,7 @@ pub mod edit;
 pub mod exif;
 pub mod geometry;
 pub mod library;
+pub mod raf;
 pub mod sidecar;
 
 pub use curve::Curve;
