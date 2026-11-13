@@ -1,0 +1,13 @@
+[package]
+name = "darkroom"
+description = "The Darkroom app: RUNE UI around the GPU develop pipeline."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+rune.workspace = true
+wgpu.workspace = true
+image.workspace = true
+darkroom-core.workspace = true
+darkroom-render.workspace = true

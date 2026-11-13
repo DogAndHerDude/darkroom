@@ -1,0 +1,11 @@
+[package]
+name = "darkroom-render"
+description = "Darkroom's GPU develop pipeline: adjustments as compute shaders, and drawing the result into a RUNE effect slot."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+darkroom-core.workspace = true
+wgpu.workspace = true
+bytemuck.workspace = true

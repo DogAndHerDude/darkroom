@@ -1,0 +1,10 @@
+[package]
+name = "darkroom-core"
+description = "Darkroom's edit model: adjustments, curves and the sidecar file each photo's edits live in."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+toml.workspace = true
