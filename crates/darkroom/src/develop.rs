@@ -5,7 +5,7 @@ use darkroom_core::Edit;
 use rune::{Cursor, Drag, El, Phase, ScrollSpec, SurfaceFit, Tx, col, effect, el, row, spacer, text};
 
 use crate::theme as t;
-use crate::ui::{button, rule, segmented, stars, top_bar};
+use crate::ui::{button, icon_button, redo_icon, rule, segmented, stars, top_bar, undo_icon};
 use crate::{PHOTO_SLOT, State, crop, curves};
 
 /// Slider track width: the 300 pt panel less its 12 pt padding on each side.
@@ -132,8 +132,13 @@ pub fn view(s: &State) -> El {
         .child(rule())
         .child(footer);
 
+    let history = row()
+        .gap(8.0)
+        .child(icon_button("undo", "Undo", undo_icon, s.history.can_undo(), State::undo))
+        .child(icon_button("redo", "Redo", redo_icon, s.history.can_redo(), State::redo));
+
     let body = row().w_full().grow(1.0).min_h(0.0).child(left).child(panel);
-    col().w_full().h_full().fill(t::BG_CANVAS).child(top_bar(s, s.photo.name.clone(), spacer())).child(rule()).child(body)
+    col().w_full().h_full().fill(t::BG_CANVAS).child(top_bar(s, s.photo.name.clone(), history)).child(rule()).child(body)
 }
 
 /// The current folder's photos along the bottom, the open one framed. Click one to open it.

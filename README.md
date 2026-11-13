@@ -15,28 +15,88 @@ Browse a folder, edit with Apple Photos-style adjustments plus proper RGB curves
 
 ## Status
 
-Phase: **implementation.** Spec, design system and initial screens are done.
+Phase: **implementation.** Every v1 area has a working first version. What follows is what's built, what isn't, what's built but known to be wrong, and what nobody has tried on real files yet. Last brought up to date 2026-11-13.
 
-| Area | State |
+### Built
+
+| Area | What works |
 | --- | --- |
-| GPU preview in a RUNE window | Working |
-| Edit model and edit files (`.darkroom` beside each photo) | Working: loads on open, saves on slider release |
-| Light: Exposure, Brilliance, Highlights, Shadows, Brightness, Contrast, Black point | Working (global tone; see notes) |
-| Color: Saturation, Vibrance (Oklab), Temperature, Tint | Working |
-| Curves: processing and editor (RGB, R, G, B) | Working: add, drag, remove points; live histogram behind; edited channels shown faintly on RGB |
-| Curves: black, grey and white point pickers | Working: pick, then click the photo |
-| Histogram at the top of the panel | Working, live from the GPU; no clipping toggles or EXIF line yet |
-| Vignette | Working |
-| Hide a section's edits | Working (text toggle; eye icon to come) |
-| Show original, Reset all | Working |
-| Detail: Definition, Sharpening, Noise reduction | Working (see notes on halos and noise) |
-| Library: folder tree, thumbnail grid, filters, sort, thumbnail size, info panel | Working |
-| Ratings and flags | Working, in the Library and Develop (keys 0–5, P, X, U) |
-| Filmstrip in Develop | Working |
-| First launch: choose a folder (remembered) | Working |
-| Crop, straighten, rotate, flip | Working: Crop tool in Develop (C), applied in the preview and in export |
-| Export: JPEG, PNG, 16-bit TIFF; resize; sRGB or Display P3; camera info | Working: one photo or everything the grid shows, with progress |
-| RAF (Fujifilm raw) | Working: developed with `rawler`; see "RAF" for what the starting look is and isn't |
+| Preview | GPU develop pipeline drawn inside the RUNE window; fit-to-view only |
+| Edit files | `.darkroom` beside each photo: read on open, written on slider release, removed when the edit is empty |
+| Light | Exposure, Brilliance, Highlights, Shadows, Brightness, Contrast, Black point. Brilliance, Highlights and Shadows act on regions, not single pixels |
+| Color | Saturation, Vibrance, Temperature, Tint |
+| Curves | RGB, R, G, B: add, drag and remove points (double-click); live histogram behind; black, grey and white point pickers on the photo |
+| Detail | Definition, Sharpening, Noise reduction, Vignette; same reach at any render size |
+| Sliders | Drag; double-click the track to reset |
+| Sections | "Hide"/"Show" a section's edits; Show original; Reset all |
+| Undo/redo | ⌘Z and ⇧⌘Z, or the arrows in the top bar, in Develop. One step per finished change (a slider drag, a curve point, a crop, a reset); each photo keeps its steps until the app quits |
+| Histogram | Live from the GPU, at the top of the panel |
+| Crop | Aspect presets (Free, Original, 1:1, 4:5, 16:9), straighten ±45°, rotate 90°, flip; applied in preview and export |
+| Library | Folder tree, thumbnail grid with disk cache, show All/Picks/Rejects, minimum rating, sort by time or name, thumbnail size, info panel with EXIF |
+| Ratings and flags | In the Library and Develop, by click or key |
+| Filmstrip | In Develop, with ← → |
+| First launch | Choose a root folder; remembered |
+| Export | JPEG, PNG, 16-bit TIFF; long-edge resize; sRGB or Display P3 with ICC profile; camera info without location; one photo or everything shown; progress and failures listed |
+| RAF | Developed with `rawler` to linear floats; thumbnails and EXIF from the embedded JPEG |
+
+### Not built
+
+In the spec or the designs, with no code yet.
+
+| Feature | Design | Notes |
+| --- | --- | --- |
+| Copy/paste edits | ◐ buttons only | Choosing which sections to paste isn't designed |
+| Presets | ✗ | |
+| 100% zoom and panning | ◐ controls only | The preview develops a 2560 px image; 100% needs the full image (export already has that path) |
+| Before/after: hold `\`, split view | ◐ toggle only | "Show original" is a button; no key, no split |
+| White balance neutral-point picker | ◐ | Curves has its pickers; Color has none |
+| Type a value into a slider | ◐ in the slider spec | |
+| Eye icon for hiding a section | ✅ | A text toggle stands in |
+| Histogram clipping toggles and overlay on the photo | ◐ overlay not drawn | |
+| EXIF line under the histogram | ✅ | |
+| Pixel readout next to the cursor while picking | ✅ | Needs a probe on pointer move |
+| Fuji film simulation in the info panel | ✅ | Needs Fujifilm MakerNote parsing |
+| Edited thumbnails | n/a | The grid shows the original (the camera's JPEG for a RAF) |
+| Multi-select in the grid | ✗ | Export is one photo or all shown, nothing between |
+| Folder watching | n/a | New photos appear after reopening the folder |
+| Missing folder or drive, unreadable file | ✗ | Failures show as a line of status text only |
+| Export file naming | ✅ | Files keep the photo's name; no template |
+| Curves luminance-only mode | ✗ | Still "maybe" in the spec |
+| Bundled fonts (Rubik, DM Mono) | n/a | The design system ships `.woff2`; unknown whether RUNE loads it |
+| Theme generated from `tokens.json` | n/a | `theme.rs` is converted by hand |
+| Keyboard shortcut list, settings screen | ✗ | |
+
+Design column: ✅ designed on the canvas · ◐ partly · ✗ not designed · n/a nothing to design.
+
+### Built, but known to be wrong or weak
+
+- **Gamut edge in pure blues:** fully saturated sRGB blues show a hard step once saturation or vibrance pushes them out of gamut. Visible on the test chart's blue ramp at +10 / +24. Oklab's hue isn't constant around blue, which is a likely cause. This reaches exports; deep skies can get close.
+- **Local tone is tuned on one synthetic scene:** the base's two numbers (`EPSILON` in `base.wgsl`, how big a brightness step counts as an edge; `base_radius`, the window, 1/60 of the long edge) are guesses set by eye on a generated backlit scene. Real photos may want others.
+- **Local tone keeps fine texture, not everything:** detail about the size of the window or larger (broad clouds) counts as region and is still flattened, as the old global curves did. A region pushed more than halfway to black or white has its detail compressed too. Brightness and Contrast stay global.
+- **Local tone speed is unmeasured:** five extra quarter-size passes per edit change while Brilliance, Highlights or Shadows are set, and five more for Definition. Not timed on a 26 MP photo or during a drag.
+- **Sharpening raises noise** in flat areas (sd 7 → 11 at 80 on the noisy test image). Wants a masking control.
+- **RAF look:** no film simulation, and a base tone fitted to one X-T4 sample. A RAF starts flatter and less saturated than its JPEG.
+- **RAF speed:** a few seconds to open (debug build), developed again on every open.
+- **RAF hot pixels:** isolated bright pixels at 100%; the camera maps them out, nothing here does.
+- **RAF + JPEG pairs** show as two separate photos.
+- **Undo history:** lost on quit, and capped at 200 steps a photo. Rating and flag changes aren't steps. The top-bar arrows have no tooltip and their icons don't brighten on hover as the design's do.
+- **Verbose edit files:** reading is sparse (missing fields are neutral), but saving writes every field, so a rating alone produces a full file.
+- **Preview is 8-bit sRGB:** RUNE has no known path for high-bit-depth or P3 output of app-supplied images. Processing is float and exports are unaffected.
+- **TIFF exports carry no camera info.**
+- **A broken edit file is ignored when a photo is opened from the command line** (`darkroom photo.jpg`): the photo opens unedited, and the next change overwrites the file. Opening from the Library refuses instead.
+
+### Not yet tried on real files
+
+Everything was built against generated test images and one downloaded X-T4 RAF.
+
+- The native folder picker (headless runs can't open it), for the library root and the export destination
+- Real Fujifilm JPEGs: EXIF fields, orientation, speed
+- Local tone (Brilliance, Highlights, Shadows) and Definition on any real photo: only a generated backlit scene so far
+- Thumbnail speed on a folder of 26–40 MP files (first visit decodes each one)
+- Noise reduction at full size on a noisy high-ISO photo (the taps are spread apart for export; only seen on ISO 160)
+- Slider drag speed with noise reduction on (81 taps per pixel)
+- Exported capture time and lens info as other apps read them
+- Display P3 exports viewed on a P3 screen
 
 ## Running
 
@@ -56,13 +116,19 @@ cargo test --workspace
 
 The toolchain is pinned to Rust 1.99.1 (RUNE's), so rustup installs it on the first build.
 
+RUNE is pinned to a `dev` rev in the root `Cargo.toml`, with the four crates RUNE patches patched from the same rev. Bump all five together. `wgpu` is pinned to RUNE's version (`~30.0.1`) so our resources live on RUNE's device.
+
 ## Workspace
 
 | Crate | What |
 | --- | --- |
-| `crates/darkroom` | The app: RUNE UI, state, and the `Preview` compositor that draws the photo |
-| `crates/darkroom-core` | The edit model (`Edit`), monotone cubic curves, geometry (crop and straighten as one affine map), edit-file load/save, the library scan, EXIF, and the RAF header. No GPU or UI |
-| `crates/darkroom-render` | GPU develop pipeline: `Params::from_edit`, the develop compute pass (`develop.wgsl`) into an `Rgba16Float` texture, and the present pass that draws it into a render pass |
+| `crates/darkroom` | The app: RUNE UI, state, background jobs, raw decoding, export file writing, and the `Preview` compositor that draws the photo |
+| `crates/darkroom-core` | The edit model (`Edit`), monotone cubic curves, geometry (crop and straighten as one affine map), undo history, edit-file load/save, the library scan, EXIF, and the RAF header. No GPU or UI |
+| `crates/darkroom-render` | GPU develop pipeline: `Params::from_edit`, the compute passes into `Rgba16Float` textures, histogram and probe readback, the present pass that draws into RUNE's render pass, and the full-size export render |
+
+## Edit files
+
+Each photo's edit is `<photo file name>.darkroom` beside it (`DSCF4127.JPG.darkroom`, TOML inside), so a JPEG and a RAF of the same shot keep separate edits. It holds the adjustments, curves, crop, rating and flag. Missing fields read as neutral, a file that doesn't parse stops the photo opening (so it isn't overwritten) and is reported in the status line, and an edit with nothing in it removes its file. Saves go through a temporary file and a rename. Originals are never written.
 
 ## Processing pipeline
 
@@ -72,28 +138,29 @@ Several compute passes per edit change, in the spec's order. All share `common.w
 | --- | --- | --- | --- |
 | Develop | `develop.wgsl` | Steps 1–6 below, source → stage (linear Rec.2020, unbounded) | Always |
 | Denoise | `denoise.wgsl` | Bilateral 9 × 9 blur on encoded RGB, stage → denoised stage | Noise reduction > 0 |
-| Pyramid | `pyramid.wgsl` | Encoded luminance at quarter size, Gaussian in two 1-D passes (σ ≈ 1% of the width) | Definition ≠ 0 |
+| Base | `base.wgsl` | The edge-aware base: encoded luminance at quarter size through a guided filter (five small passes), kept as two coefficients a full-size pass turns back into a base with its own luminance | Before Develop when Brilliance, Highlights or Shadows ≠ 0 (of the exposed source); before Finish when Definition ≠ 0 (of the stage) |
 | Finish | `finish.wgsl` | Steps 7–9 below, → working texture | Always |
 
 Per pixel, in order:
 
-1. **Input:** the sRGB source is decoded to linear and converted to linear Rec.2020, the working space.
+1. **Input:** the source (8-bit sRGB for a JPEG or PNG, linear half floats for a RAF) is read as linear sRGB-primary light and converted to linear Rec.2020, the working space.
 2. **White balance:** per-channel multipliers, normalized so white keeps its luminance.
 3. **Exposure:** a multiplier, 2^stops.
-4. **Light:** black point per channel in linear light. Then Brilliance, Highlights, Shadows, Brightness and Contrast as one tone function on perceptually encoded luminance; the channels are scaled by the luminance ratio, so hue holds.
+4. **Light:** black point per channel in linear light. Then tone on perceptually encoded luminance; the channels are scaled by the luminance ratio, so hue holds. Brilliance, Highlights and Shadows are local: the brightness of the pixel's region (the edge-aware base) moves along the tone curve and the pixel keeps its distance from it, so a lifted shadow keeps its texture. Black and white stay fixed. Brightness and Contrast are global curves.
 5. **Color:** Saturation and Vibrance scale chroma in Oklab, at constant hue and lightness.
 6. **Curves:** composite then per-channel, on display (sRGB-primary) channels in perceptual encoding. Lookup tables come from `Curve::lut`.
 7. **Detail:**
    - **Noise reduction:** in its own pass, before the others.
+   - **Reach:** sharpening and noise reduction are defined in preview pixels and scaled by `Develop::detail_scale` (render long edge ÷ preview long edge: 1 in the preview, about 2.4 for a full-size 26 MP export). Sharpening's blur taps move apart by the scale; noise reduction keeps its 9 × 9 taps and spreads them by a whole-pixel stride, so cost per pixel doesn't grow.
    - **Sharpening:** an unsharp mask on luminance against a 5 × 5 binomial blur, ignoring differences under 0.01 so flat areas sharpen less.
-   - **Definition:** midtone-weighted local contrast. It compares the 5 × 5 blur, not the raw pixel, against the wide quarter-size blur, so it doesn't amplify pixel noise.
+   - **Definition:** midtone-weighted local contrast. It compares the 5 × 5 blur, not the raw pixel, against the edge-aware base, so it doesn't amplify pixel noise, and beside a strong edge the base follows the pixel, so there is no halo.
 8. **Vignette:** a radial multiplier.
-9. **Output:** convert to linear sRGB. In-range pixels are untouched, so an unedited photo comes out as it went in. Out-of-range pixels are handled in three steps:
+9. **Output:** convert to linear sRGB, or Display P3 for a P3 export. In-range pixels are untouched, so an unedited photo comes out as it went in. Out-of-range pixels are handled in three steps:
    - **Brighter than white:** all three channels are scaled down by the brightest, keeping hue and saturation.
    - **Too saturated for sRGB:** the colour loses chroma at constant Oklab hue and lightness until it fits.
    - **Far past white in luminance:** the colour fades gradually towards white.
 
-The working texture holds display-referred linear sRGB; the present pass only encodes it.
+The working texture holds display-referred linear values. The present pass applies the geometry (see "Crop and straighten") and encodes.
 
 ## Reading results back from the GPU
 
@@ -107,10 +174,6 @@ Two RUNE Metal-backend quirks this works around (worth reporting upstream):
 - **Workgroup atomics:** `var<workgroup>` atomics come back as zero, so the histogram counts straight into global atomics. Both run correctly on the stock wgpu backend (`RUNE_GPU_BACKEND=wgpu`).
 
 `DARKROOM_DEBUG=1` prints each readback.
-
-Edit files are `<photo name>.darkroom` (`DSCF4127.JPG.darkroom`, TOML inside), so a JPEG and RAF of the same shot keep separate edits. They're sparse: missing fields read as neutral. An edit with nothing in it removes its file.
-
-RUNE is pinned to a `dev` rev in the root `Cargo.toml`, with the four crates RUNE patches patched from the same rev. Bump all five together. `wgpu` is pinned to RUNE's version (`~30.0.1`) so our resources live on RUNE's device.
 
 ## Crop and straighten
 
@@ -157,6 +220,8 @@ How it runs: one photo at a time. A background thread decodes the full image and
   | G or Esc | Back to the Library |
   | D | Develop |
   | C | Crop tool on and off (Develop) |
+  | ⌘Z / ⇧⌘Z | Undo / redo (Develop) |
+  | Return or Esc | Leave the crop tool; Esc also closes the export dialog |
 
 ## Preview path (decided by the spike)
 
@@ -168,105 +233,48 @@ The photo is drawn through a RUNE **compositor and effect slot**, not `El::pixel
 
 So the preview never leaves the GPU, and processing stays in float until the final draw. RUNE's isolated layers are `Rgba16Float`, so a float target may also allow an EDR path later.
 
-## Architecture (from the spec)
-
-- **Sidecar edits:** each photo gets a recipe file with adjustments, crop, rating and flag. Originals are read-only.
-- **Processing pipeline:** decode → linear wide-gamut float working space → adjustments in a fixed order → output transform (display or export).
-- **Proposed adjustment order:** white balance → exposure → light (tone, black point) → color → curves → detail → vignette. Still to confirm.
-- **GPU:** adjustments are wgpu compute shaders on the same device RUNE uses. Preview at screen resolution; full resolution only for 100% zoom and export.
-- **Design tokens:** generate a Rust constants module from the design system's `tokens.json` at build time, so values aren't copied by hand.
-- **Fonts:** bundle Rubik and DM Mono from the design system's `fonts/`.
-
-## v1 features
-
-Design column: ✅ designed on the canvas · ◐ partly designed · ✗ not designed yet.
-
-### Editing
-
-| Feature | Design | Notes |
-| --- | --- | --- |
-| Light: Exposure, Brilliance, Highlights, Shadows, Brightness, Contrast, Black point | ✅ | Develop screen |
-| Color: Saturation, Vibrance, Temperature, Tint | ✅ | Spectrum tracks for Temperature and Tint only |
-| Neutral-point white balance picker | ◐ | Button in the Color header; picking state shown only for the Curves grey point |
-| Curves: RGB plus R, G, B; monotone cubic; add and remove points | ✅ | Curves screen |
-| Curves: black, grey and white point pickers | ✅ | |
-| Curves: luminance-only mode | ✗ | Still "maybe" in the spec |
-| Detail: Definition, Sharpening, Noise reduction, Vignette | ✗ | Section exists but is collapsed in every screen |
-| Crop with aspect presets, straighten, rotate 90°, flip | ✅ | Crop screen |
-| Hide a section's edits (eye icon) | ✅ | |
-| Double-click a label to reset a slider; click the value to type it | ◐ | Behaviour is in the design system's slider spec, not drawn |
-
-### Viewing and workflow
-
-| Feature | Design | Notes |
-| --- | --- | --- |
-| Library: folder tree, thumbnail grid, filters, sort, thumbnail size | ✅ | Library screen |
-| Ratings and pick/reject flags | ✅ | |
-| Info panel with EXIF and Fuji film simulation fields | ✅ | Needs MakerNote parsing |
-| Filmstrip in Develop | ✅ | |
-| Histogram with clipping toggles | ✅ | Clipping overlay on the photo not drawn |
-| Fit and 100% zoom, panning | ◐ | Controls drawn; 100% view not drawn |
-| Before/after (hold `\`) and split view | ◐ | Toggle drawn; split view not drawn |
-| Undo/redo history | ◐ | Buttons only |
-| Copy/paste edits | ◐ | Buttons only; choosing which panels to paste not designed |
-| Presets | ✗ | Not designed |
-| Export: format, quality, sRGB/P3, resize, metadata, destination, naming, batch | ✅ | Export dialog |
-| First launch / empty library | ✅ | |
-| RAF (RAW) support | ✗ | Built; no RAF-specific UI |
-
 ## Still missing
 
-### Designs
+"Not built" and "known to be wrong" above are the list of work. Two more lists belong to it.
 
-- Detail section, open (Definition, Sharpening, Noise reduction, Vignette)
+### Designs still to draw
+
+- Detail section, open (it is built, laid out like the other sections)
+- Export progress, finished and failed states (built as a plain dialog; wants the Alert component)
 - Before/after split view, and the 100% zoom view
 - Clipping overlay on the photo
 - Presets: list, save, apply
 - Paste edits with a choice of sections
 - White balance picker in use on the photo
-- Export progress, finished and failed states: built without a design (a plain dialog); wants the Alert component
 - Error and warning states: unreadable file, missing folder or drive
-- RAF-specific UI: true white balance in Kelvin and anything decoder-specific
-- Keyboard shortcut list
-- Settings, if any are needed (default export folder, cache location)
+- RAF-specific UI: true white balance in Kelvin, anything decoder-specific
+- RAF + JPEG pairs in the grid
+- Keyboard shortcut list; settings, if any are needed
+- New icons to add to the design system: eyedropper, folder, flip, swap orientation
 
-### Decisions to make before or during implementation
+### Decisions
 
-- [x] **Preview path in RUNE:** compositor plus effect slot on RUNE's device (see "Preview path" above).
-- [x] **Output transform:** constant-hue chroma reduction in Oklab for anything out of range (see "Processing pipeline").
-- [ ] **Local tone for Brilliance, Highlights and Shadows.** They're global tone curves for now. Apple's versions act locally (they lift a dark area without flattening it), which needs a blurred luminance pass. That pass would also serve Definition.
-- [ ] **Exposure headroom.** Values brighter than white survive until output but are then mapped into SDR. Pulling an overexposed photo down already works; an EDR preview would need a float display path.
-- [ ] **Design tokens:** `crates/darkroom/src/theme.rs` is converted by hand from `tokens.json` for now; replace it with a build-time generated module.
-- [ ] **Fonts:** bundle Rubik and DM Mono. The design system ships `.woff2`; check whether RUNE's font stack loads WOFF2 or needs TTF/OTF.
-- [x] **Full-resolution path for export:** whole image on the GPU, read back in strips. 100% zoom in the preview is still to do.
-- [x] **RAF decoder:** `rawler`, with its Markesteijn demosaic for X-Trans.
-- [ ] **RAF look:** no film simulation and a base tone fitted to one sample. Wants checking against real files from the camera in use; a per-film-simulation curve, or reading the camera's settings from the MakerNote, would close the gap to the JPEG.
-- [ ] **RAF speed:** cache the developed preview, or show the embedded JPEG first and swap when the raw is ready.
-- [ ] **RAF hot pixels:** isolated bright pixels show at 100% (the camera maps them out; nothing here does yet).
-- [ ] **RAF + JPEG pairs:** both show in the grid as separate photos. An option to stack or hide one would tidy that.
-- [ ] **Export of the embedded capture time:** written to EXIF but not checked in other apps yet. Camera info isn't written to TIFF.
-- [x] **Adjustment order:** as in "Processing pipeline"; curves run on display channels.
-- [x] **Sidecar name and format:** `DSCF1234.JPG.darkroom`, TOML inside (matches the Library screen's "a .darkroom file").
-- [x] **GPU readback:** see "Reading results back from the GPU".
-- [ ] **Thumbnails show the original,** not the edit. Rendering edited thumbnails needs the develop pipeline on small images, ideally once per saved edit.
-- [ ] **Fuji film simulation in the info panel:** needs reading Fujifilm's MakerNote. Wants a real file to check the tag numbers against.
-- [ ] **Thumbnail speed on real 40 MP files:** untested here (the test library is 1800 px JPEGs). The first visit decodes every full image once; the cache makes later visits instant.
-- [ ] **Sparse edit files:** a rating alone writes the whole edit (every field at its default). Writing only non-default fields would keep the files readable.
-- [ ] **Library details still to build:** multi-select (export is one photo or all shown, nothing between), offline-original warnings, folder watching (new photos appear only after reopening the folder).
-- [ ] **Gamut edge in pure blues:** pure, fully saturated sRGB blues show a hard step once saturation or vibrance pushes them out of gamut. It's visible on the test chart's blue ramp even at +10 / +24, and as a hard azure-to-blue edge at extremes. Oklab's hue isn't constant around blue, which is a likely cause. Must be fixed before export; deep skies can get close.
-- [ ] **Definition halos:** Definition compares against a Gaussian blur, so strong values leave a light or dark rim along high-contrast edges (visible at 70 around a dark shape on sky). An edge-aware base (guided filter or bilateral pyramid) would remove it. The same base would serve local Brilliance, Highlights and Shadows.
-- [ ] **Sharpening on noisy photos:** sharpening still raises noise in flat areas (measured sd 7 → 11 at 80 on the noisy test image). A masking control, as Lightroom has, or pairing with noise reduction, would help.
-- [ ] **Detail at preview size:** sharpening and noise-reduction radii are in pixels of whatever is being developed. Export doesn't scale them yet, so at full resolution they act on finer detail than the 2560 px preview shows and look weaker. Definition scales with the image and is unaffected.
-- [ ] **Detail timing:** not measured yet. Noise reduction is 81 taps per pixel and the most expensive pass; if dragging feels slow on a full preview, run detail at a lower resolution while the pointer is down.
-- [ ] **Picker hover readout:** the design shows the pixel's values next to the cursor while picking. Needs a probe on pointer move.
-- [x] **Working colour space and precision:** linear Rec.2020, f32 in the shader, `Rgba16Float` between passes.
-- [ ] **Thumbnail cache:** location and size.
-- [ ] **Histogram while Curves is open:** hide it or keep it (the Curves screen currently hides it).
-- [ ] **New icons:** add the eyedropper, folder, flip and swap-orientation icons drawn for the screens to the design system.
+Made:
 
-### Known constraint
+- **Preview path:** compositor plus effect slot on RUNE's device.
+- **Working space:** linear Rec.2020, f32 in the shader, `Rgba16Float` between passes.
+- **Adjustment order:** as in "Processing pipeline"; curves run on display channels.
+- **Output transform:** constant-hue chroma reduction in Oklab for anything out of range.
+- **Edit file:** `DSCF1234.JPG.darkroom`, TOML inside.
+- **GPU readback:** a thread per readback, results picked up in `poll`.
+- **Full-size export:** the whole image on the GPU, read back in strips.
+- **RAF decoder:** `rawler`, with its Markesteijn demosaic for X-Trans.
+- **Detail reach:** in preview pixels, scaled per render.
+- **Undo model:** per-photo history in memory (`darkroom-core/src/history.rs`), whole edits, nothing in the edit file.
+- **Edge-aware base:** a guided filter (He, Sun, Tang 2010) on quarter-size luminance, guided by itself. One set of passes serves Brilliance, Highlights, Shadows and Definition.
 
-RUNE has no known path for high-bit-depth or Display P3 output of app-supplied images, so the v1 preview is likely 8-bit sRGB. Processing stays in float, and exports are unaffected.
+Open:
+
+- **RAF starting look:** a curve per film simulation, or read the camera's settings from the MakerNote, or leave it flat.
+- **RAF preview:** cache the developed preview, or show the embedded JPEG first and swap.
+- **Exposure headroom:** values over white survive to the output step and are then mapped into SDR. An EDR preview would need a float display path.
+- **Thumbnail cache:** it lives in `~/Library/Caches/darkroom/thumbs` with no size limit or cleanup.
+- **Edited thumbnails:** render through the develop pipeline once per saved edit, or keep showing originals.
 
 ## Later (v2+)
 

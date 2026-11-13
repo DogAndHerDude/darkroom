@@ -8,9 +8,11 @@ pub mod curve;
 pub mod edit;
 pub mod exif;
 pub mod geometry;
+pub mod history;
 pub mod library;
 pub mod raf;
 pub mod sidecar;
 
 pub use curve::Curve;
+pub use history::History;
 pub use edit::{Channel, Color, Curves, Detail, Edit, Flag, Geometry, Light, Picker};

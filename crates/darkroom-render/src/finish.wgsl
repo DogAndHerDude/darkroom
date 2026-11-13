@@ -7,7 +7,8 @@
 // in the perceptual encoding.
 
 @group(0) @binding(0) var stage: texture_2d<f32>;
-@group(0) @binding(1) var wide: texture_2d<f32>;
+// The stage's edge-aware base at quarter size, as a and b (base.wgsl).
+@group(0) @binding(1) var base: texture_2d<f32>;
 @group(0) @binding(2) var smp: sampler;
 @group(0) @binding(3) var working: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(4) var<uniform> p: Params;
@@ -16,17 +17,20 @@
 // it brings out edges more than noise.
 const SHARPEN_THRESHOLD: f32 = 0.01;
 
-fn luma_at(q: vec2<i32>, size: vec2<i32>) -> f32 {
-    return encode(dot(textureLoad(stage, clamp(q, vec2<i32>(0), size - vec2<i32>(1)), 0).rgb, LUMA));
+// Encoded luminance at a position in pixels, between pixels by bilinear interpolation.
+fn luma_at(pos: vec2<f32>, size: vec2<i32>) -> f32 {
+    return encode(dot(textureSampleLevel(stage, smp, pos / vec2<f32>(size), 0.0).rgb, LUMA));
 }
 
-// A 5 × 5 binomial blur (about σ = 1 px) of encoded luminance: the unsharp mask's reference.
-fn fine_blur(at: vec2<i32>, size: vec2<i32>) -> f32 {
+// A 5 × 5 binomial blur of encoded luminance, the unsharp mask's reference: about σ = 1 preview
+// pixel. The taps sit `step` pixels apart, so a render at another size blurs the same detail.
+fn fine_blur(at: vec2<i32>, size: vec2<i32>, step: f32) -> f32 {
+    let centre = vec2<f32>(at) + 0.5;
     var k = array<f32, 5>(1.0, 4.0, 6.0, 4.0, 1.0);
     var sum = 0.0;
     for (var dy = -2; dy <= 2; dy++) {
         for (var dx = -2; dx <= 2; dx++) {
-            sum += luma_at(at + vec2<i32>(dx, dy), size) * k[dx + 2] * k[dy + 2];
+            sum += luma_at(centre + vec2<f32>(f32(dx), f32(dy)) * step, size) * k[dx + 2] * k[dy + 2];
         }
     }
     return sum / 256.0;
@@ -58,17 +62,19 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if definition != 0.0 || sharpening > 0.0 {
         let y = dot(c, LUMA);
         let e0 = encode(y);
-        let fine = fine_blur(at, size);
+        let fine = fine_blur(at, size, max(p.output.y, 0.25));
         var e = e0;
         if sharpening > 0.0 {
             let d = e0 - fine;
             e += sharpening * 1.5 * sign(d) * max(abs(d) - SHARPEN_THRESHOLD, 0.0);
         }
         if definition != 0.0 {
-            // Local contrast: the lightly blurred value against the wide blur, a band that
+            // Local contrast: the lightly blurred value against its region's base, a band that
             // leaves pixel-level noise out (that's sharpening's job), strongest in the midtones
-            // so shadows and highlights don't clip. Negative values soften.
-            let d = fine - textureSampleLevel(wide, smp, uv, 0.0).r;
+            // so shadows and highlights don't clip. Negative values soften. Beside an edge the
+            // base follows the pixel, so the difference fades there and leaves no halo.
+            let ab = textureSampleLevel(base, smp, uv, 0.0).rg;
+            let d = fine - (ab.x * fine + ab.y);
             let q = clamp(e0, 0.0, 1.0);
             e += definition * 0.8 * d * clamp(4.0 * q * (1.0 - q), 0.0, 1.0);
         }

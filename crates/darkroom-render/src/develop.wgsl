@@ -4,8 +4,10 @@
 //   source (sRGB) → linear Rec.2020 working space
 //   1 white balance → 2 exposure → 3 light (black point, then tone) → 4 color → 5 curves
 //
-// Then: noise reduction (denoise.wgsl), the definition blur (pyramid.wgsl), and finish.wgsl for
-// sharpening, definition, vignette and the output transform.
+// Before it, when Brilliance, Highlights or Shadows are set: the edge-aware base of the photo's
+// luminance (base.wgsl), which makes those three act on regions. After it: noise reduction
+// (denoise.wgsl), the base again for Definition, and finish.wgsl for sharpening, definition,
+// vignette and the output transform.
 
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var stage: texture_storage_2d<rgba16float, write>;
@@ -14,43 +16,88 @@
 @group(0) @binding(3) var<storage, read> curves: array<f32>;
 // The curve point pickers' probe result (see `probe`).
 @group(0) @binding(4) var<storage, read_write> probed: array<f32, 4>;
+// The base's a and b at quarter size (base.wgsl), of the luminance the tone step receives.
+@group(0) @binding(5) var tone_base: texture_2d<f32>;
+@group(0) @binding(6) var smp: sampler;
 
 const LUT_SIZE: u32 = 1024u;
 
 // ---- 3 light --------------------------------------------------------------------------------
 
-// Global tone on encoded luminance `e`. Weights are taken at min(e, 1) so values past white
-// only shift, never fold back.
-fn tone(e_in: f32) -> f32 {
-    var e = e_in;
+// The curve through (0, 0) and (1, 1) with slope `k` at 1: a parabola, with a finite slope at 0
+// so noise near the end isn't stretched. It stays monotonic for k up to 2.
+fn ease(u: f32, k_in: f32) -> f32 {
+    let k = min(k_in, 2.0);
+    return u * ((2.0 - k) + (k - 1.0) * u);
+}
+
+// Where a pixel `e` (0..1) goes when its region's base moves from `b` to `to`. A pixel at the
+// base goes with it, and one near the base keeps its distance from it (the slope there is 1),
+// so the region's detail keeps its contrast. Further away the pixel eases back to the ends:
+// black stays black, white stays white, and nothing can clip. A base moved more than halfway
+// to an end leaves too little room on that side, and detail there is compressed after all.
+fn follow(e: f32, b: f32, to_in: f32) -> f32 {
+    let to = clamp(to_in, 0.005, 0.995);
+    if e <= b {
+        return to * ease(e / b, b / to);
+    }
+    return 1.0 - (1.0 - to) * ease((1.0 - e) / (1.0 - b), (1.0 - b) / (1.0 - to));
+}
+
+// Highlights and Shadows (and Brilliance, which moves both) on encoded luminance `e`, by the
+// brightness of the region the pixel is in, `base`, rather than its own. The base moves along
+// the curves b + 1.5·h·b²(1 − b) and b + 1.5·s·b(1 − b)², bumps peaking around 2/3 and 1/3, and
+// the pixel follows it. So a dark region lifts as a whole and keeps the contrast it had, where
+// one tone curve for the whole photo would flatten its midtones.
+fn regional(e_in: f32, base: f32) -> f32 {
+    // Values past white are left alone, so they only shift, never fold back.
+    if e_in >= 1.0 {
+        return e_in;
+    }
     let brilliance = p.light.z;
     let highlights = p.light.w + brilliance * -0.6;
     let shadows = p.tone.x + brilliance * 0.6;
+    var e = e_in;
+    // Kept off the ends, where `follow` would divide by zero.
+    var b = clamp(base, 0.02, 0.98);
+    if highlights != 0.0 {
+        let to = b + 1.5 * highlights * b * b * (1.0 - b);
+        e = follow(e, b, to);
+        b = clamp(to, 0.02, 0.98);
+    }
+    if shadows != 0.0 {
+        e = follow(e, b, b + 1.5 * shadows * b * (1.0 - b) * (1.0 - b));
+    }
+    return e;
+}
+
+// Brightness and Contrast: global, on the pixel's own encoded luminance. Weights are taken at
+// min(e, 1) so values past white only shift, never fold back.
+fn tone(e_in: f32) -> f32 {
+    var e = e_in;
     let brightness = p.tone.y;
-    let contrast = p.tone.z + brilliance * 0.2;
+    let contrast = p.tone.z + p.light.z * 0.2;
 
     var q = clamp(e, 0.0, 1.0);
-    e = e + highlights * 1.5 * q * q * (1.0 - q);           // peaks around 2/3
-    q = clamp(e, 0.0, 1.0);
-    e = e + shadows * 1.5 * q * (1.0 - q) * (1.0 - q);      // peaks around 1/3
-    q = clamp(e, 0.0, 1.0);
     e = e + brightness * 0.8 * q * (1.0 - q);               // midtones
     q = clamp(e, 0.0, 1.0);
     e = e + contrast * (q - 0.5) * 4.0 * q * (1.0 - q);     // S around middle grey, ends fixed
     return max(e, 0.0);
 }
 
-fn light(c_in: vec3<f32>) -> vec3<f32> {
-    // Black point: positive crushes, negative lifts, on each channel in linear light.
-    let b = p.light.y * 0.03;
-    let c = max((c_in - vec3<f32>(b)) / (1.0 - b), vec3<f32>(0.0));
-
+// `c` is the photo after the black point; `uv` is where the pixel is, for its region's base.
+fn light(c: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     if all(p.tone == vec4<f32>(0.0)) && p.light.z == 0.0 && p.light.w == 0.0 {
         return c;
     }
     // Tone works on luminance and scales the channels by the ratio, so hue holds.
     let y = dot(c, LUMA);
-    return with_luma(c, y, decode(tone(encode(y))));
+    var e = encode(y);
+    if p.light.z != 0.0 || p.light.w != 0.0 || p.tone.x != 0.0 {
+        let ab = textureSampleLevel(tone_base, smp, uv, 0.0).rg;
+        e = regional(e, ab.x * e + ab.y);
+    }
+    return with_luma(c, y, decode(tone(e)));
 }
 
 // ---- 4 color --------------------------------------------------------------------------------
@@ -93,11 +140,9 @@ fn apply_curves(c2020: vec3<f32>) -> vec3<f32> {
 // Steps 1–4: everything before curves.
 fn before_curves(at: vec2<u32>) -> vec3<f32> {
     // The source is an *Srgb texture, so this load is already linear.
-    var c = srgb_to_2020(textureLoad(src, vec2<i32>(at), 0).rgb);
-    c = c * p.white_balance.rgb;                // 1
-    c = c * p.light.x;                          // 2
-    c = light(c);                               // 3
-    return color(c);                            // 4
+    var c = exposed(textureLoad(src, vec2<i32>(at), 0).rgb);                      // 1, 2
+    c = light(c, (vec2<f32>(at) + 0.5) / vec2<f32>(textureDimensions(src)));      // 3
+    return color(c);                                                              // 4
 }
 
 @compute @workgroup_size(8, 8)

@@ -26,10 +26,11 @@ pub struct Params {
     pub color: [f32; 4],
     /// Vignette (0..1), curves on (0 or 1), and the pixel the probe reads (x, y).
     pub effects: [f32; 4],
-    /// Definition (−1..1), sharpening and noise reduction (0..1), and the definition blur's σ in
-    /// quarter-size pixels (set per photo by `Develop`).
+    /// Definition (−1..1), sharpening and noise reduction (0..1), and the edge-aware base's
+    /// window radius in quarter-size pixels (set per photo by `Develop`).
     pub detail: [f32; 4],
-    /// 1 for Display P3 output, 0 for sRGB (the preview is always sRGB; set by `Develop`).
+    /// x: 1 for Display P3 output, 0 for sRGB (the preview is always sRGB). y: the detail scale,
+    /// pixels of this render per preview pixel. Both set by `Develop`.
     pub output: [f32; 4],
 }
 

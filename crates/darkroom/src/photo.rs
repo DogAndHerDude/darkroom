@@ -9,7 +9,7 @@ use image::{DynamicImage, ImageDecoder, ImageReader, imageops::FilterType};
 
 /// The longest edge of the preview the develop pass runs on. Full resolution is for 100% zoom
 /// and export, later.
-const PREVIEW_EDGE: u32 = 2560;
+pub const PREVIEW_EDGE: u32 = 2560;
 
 pub struct Photo {
     /// Unique per load, so the GPU side knows when to upload again.

@@ -39,6 +39,8 @@ pub struct Prepared {
     pub size: [u32; 2],
     pub pixels: Pixels,
     pub edit: Edit,
+    /// Pixels here per pixel of the preview this photo is edited on, for the detail tools.
+    pub detail_scale: f32,
 }
 
 /// Posts messages from any thread, waking the window.
@@ -172,7 +174,15 @@ fn prepare(path: &Path, long_edge: Option<u32>) -> Result<Prepared, String> {
         }
     }
     let (size, pixels) = Pixels::from_image(img);
-    Ok(Prepared { path: path.to_owned(), size, pixels, edit })
+    let detail_scale = detail_scale(full, size);
+    Ok(Prepared { path: path.to_owned(), size, pixels, edit, detail_scale })
+}
+
+/// How many pixels of a render at `size` cover one pixel of the preview of a photo `full` in
+/// size: the preview is the photo itself up to `PREVIEW_EDGE` on its long edge.
+fn detail_scale(full: [u32; 2], size: [u32; 2]) -> f32 {
+    let long = |[w, h]: [u32; 2]| w.max(h).max(1) as f32;
+    long(size) / long(full).min(photo::PREVIEW_EDGE as f32)
 }
 
 /// The JPEG inside a RAF, decoded upright.
@@ -253,4 +263,16 @@ fn thumbnail(path: &Path) -> Option<(u32, u32, Vec<u8>)> {
     }
     let rgba = DynamicImage::ImageRgb8(small).into_rgba8();
     Some((rgba.width(), rgba.height(), rgba.into_raw()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detail_scale_is_measured_against_the_preview() {
+        assert_eq!(detail_scale([1800, 1200], [1800, 1200]), 1.0, "a small photo is its own preview");
+        assert_eq!(detail_scale([6240, 4160], [6240, 4160]), 6240.0 / 2560.0, "full size");
+        assert_eq!(detail_scale([4160, 6240], [1365, 2048]), 0.8, "portrait, exported smaller than the preview");
+    }
 }

@@ -7,8 +7,8 @@ struct Params {
     tone: vec4<f32>,          // shadows, brightness, contrast
     color: vec4<f32>,         // saturation, vibrance
     effects: vec4<f32>,       // vignette, curves on, probe x, probe y
-    detail: vec4<f32>,        // definition (−1..1), sharpening, noise reduction (0..1), definition blur σ in quarter-size pixels
-    output: vec4<f32>,        // x: 1 for Display P3 output, 0 for sRGB
+    detail: vec4<f32>,        // definition (−1..1), sharpening, noise reduction (0..1), the base's window radius in quarter-size pixels
+    output: vec4<f32>,        // x: 1 for Display P3 output, 0 for sRGB; y: detail scale (pixels here per preview pixel)
 }
 
 const LUMA: vec3<f32> = vec3<f32>(0.2627, 0.6780, 0.0593); // Rec.2020
@@ -32,6 +32,15 @@ fn rec2020_to_srgb(c: vec3<f32>) -> vec3<f32> {
         dot(c, vec3<f32>(-0.124550, 1.132900, -0.008349)),
         dot(c, vec3<f32>(-0.018151, -0.100579, 1.118730)),
     );
+}
+
+// Steps 1 and 2 and the black point, from a source pixel (linear sRGB primaries): the photo as
+// the tone step receives it. Every pass binds its Params as `p`.
+fn exposed(srgb: vec3<f32>) -> vec3<f32> {
+    let c = srgb_to_2020(srgb) * p.white_balance.rgb * p.light.x;
+    // Black point: positive crushes, negative lifts, on each channel in linear light.
+    let b = p.light.y * 0.03;
+    return max((c - vec3<f32>(b)) / (1.0 - b), vec3<f32>(0.0));
 }
 
 // A perceptual encoding for tone work, curves and detail: a 2.2 power, extended linearly past 1

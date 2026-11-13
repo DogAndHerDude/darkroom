@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use darkroom_core::library::{Entry, Filter, Folder, Sort};
 use darkroom_core::geometry::Affine;
-use darkroom_core::{Channel, Curve, Edit, Flag, sidecar};
+use darkroom_core::{Channel, Curve, Edit, Flag, History, sidecar};
 use darkroom_render::{Develop, Histogram, Placement, Results};
 use rune::compose::DeviceKey;
 use rune::prefs::Prefs;
@@ -71,6 +71,10 @@ struct State {
     /// A photo being opened in the background.
     opening: Option<PathBuf>,
     edit: Edit,
+    /// The open photo's undo steps.
+    history: History,
+    /// The undo steps of photos opened earlier, kept until the app quits.
+    histories: HashMap<PathBuf, History>,
     show_original: bool,
     /// The last save's or open's outcome, shown in the panel.
     status: String,
@@ -116,8 +120,10 @@ impl State {
         if self.show_original { self.edit.without_adjustments() } else { self.edit.clone() }
     }
 
-    /// Saves the open photo's edit beside it.
+    /// Saves the open photo's edit beside it. Every finished change ends here, so this is
+    /// also where it becomes an undo step.
     fn save(&mut self) {
+        self.history.record(&self.edit);
         let Some(path) = self.path.clone() else { return };
         self.status = match sidecar::save(&path, &self.edit) {
             Ok(()) if self.edit.has_adjustments() => "Edited · saved".into(),
@@ -240,6 +246,25 @@ impl State {
         self.entries.clear();
         self.loading_folder = true;
         self.selected = None;
+    }
+
+    fn undo(&mut self) {
+        let step = self.history.undo(&self.edit);
+        self.restore(step);
+    }
+
+    fn redo(&mut self) {
+        let step = self.history.redo(&self.edit);
+        self.restore(step);
+    }
+
+    /// Puts an undo or redo step in place and saves it.
+    fn restore(&mut self, step: Option<Edit>) {
+        let Some(edit) = step else { return };
+        self.edit = edit;
+        // A selected curve point or a crop drag may no longer exist in the restored edit.
+        (self.curve_point, self.curve_removing, self.crop_start) = (None, false, None);
+        self.save();
     }
 
     /// Opens a photo in Develop (in the background; the current one stays until it's ready).
@@ -371,6 +396,12 @@ impl State {
                         self.histogram = photo.histogram;
                         self.photo = Arc::new(photo);
                         self.status = if edit.has_adjustments() { "Edited".into() } else { "Not edited".into() };
+                        // Pick up this photo's earlier history, unless its edit file has changed since.
+                        let history = self.histories.remove(&path).filter(|h| h.is_at(&edit)).unwrap_or_else(|| History::new(&edit));
+                        let left = std::mem::replace(&mut self.history, history);
+                        if let Some(p) = self.path.take() {
+                            self.histories.insert(p, left);
+                        }
                         self.edit = edit;
                         self.path = Some(path);
                         self.show_original = false;
@@ -411,6 +442,8 @@ fn init() -> State {
         path: None,
         opening: None,
         edit: Edit::default(),
+        history: History::new(&Edit::default()),
+        histories: HashMap::new(),
         show_original: false,
         status: String::new(),
         curve_channel: Channel::Rgb,
@@ -449,6 +482,7 @@ fn init() -> State {
                     s.histogram = photo.histogram;
                     s.photo = Arc::new(photo);
                     s.edit = sidecar::load(&file).unwrap_or_default();
+                    s.history = History::new(&s.edit);
                     s.status = if s.edit.has_adjustments() { "Edited".into() } else { "Not edited".into() };
                     s.selected = Some(file.clone());
                     s.path = Some(file);
@@ -498,8 +532,13 @@ fn poll(s: &mut State, _t: f64, _tx: &mut Tx) -> bool {
 }
 
 /// Keyboard shortcuts, as in Lightroom: 0–5 rate, P pick, X reject, U unflag, ← → move between
-/// photos, Return opens the selected photo in Develop, G or Esc goes back to the Library.
+/// photos, Return opens the selected photo in Develop, G or Esc goes back to the Library. ⌘Z
+/// undoes and ⇧⌘Z redoes in Develop.
 fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
+    if ev.is_command('z') && s.module == Module::Develop && s.export_scope.is_none() && s.export_run.is_none() {
+        if ev.mods.shift { s.redo() } else { s.undo() }
+        return true;
+    }
     if ev.mods.cmd || ev.mods.ctrl || ev.mods.alt {
         return false;
     }
@@ -566,6 +605,7 @@ impl Compositor<State> for Preview {
                 let mut gpu = Develop::new(f.device, Arc::new(Results::default()), Arc::new(|| {}));
                 gpu.histogram_enabled = false;
                 gpu.display_p3 = settings.display_p3;
+                gpu.detail_scale = prepared.detail_scale;
                 gpu.set_photo(f.device, f.queue, u64::MAX - index as u64, prepared.size, prepared.pixels.source());
                 gpu.update(f.device, f.queue, &prepared.edit);
                 let g = &prepared.edit.geometry;

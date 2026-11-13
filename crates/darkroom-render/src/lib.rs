@@ -96,18 +96,22 @@ const COMMON: &str = include_str!("common.wgsl");
 struct Photo {
     id: u64,
     size: [u32; 2],
-    /// The definition blur's size: a quarter of the photo's, rounded up.
+    /// The edge-aware base's size: a quarter of the photo's, rounded up.
     quarter: [u32; 2],
     /// Source → stage (steps 1–5).
     develop_group: wgpu::BindGroup,
     /// Stage → denoised stage.
     denoise_group: wgpu::BindGroup,
-    /// Stage (or denoised stage) → quarter A, then A → B → A for the two blur directions.
+    /// The base's passes (see `base.wgsl`). The source, the stage or the denoised stage →
+    /// quarter A, then A → B → A → B, and last B → A for Definition or B → the tone base, which
+    /// the develop pass and the probe read.
+    downsample_source_group: wgpu::BindGroup,
     downsample_group: wgpu::BindGroup,
     downsample_denoised_group: wgpu::BindGroup,
-    blur_h_group: wgpu::BindGroup,
-    blur_v_group: wgpu::BindGroup,
-    /// Stage (or denoised stage) and the blur → working texture.
+    base_ab_group: wgpu::BindGroup,
+    base_ba_group: wgpu::BindGroup,
+    base_tone_group: wgpu::BindGroup,
+    /// Stage (or denoised stage) and its base → working texture.
     finish_group: wgpu::BindGroup,
     finish_denoised_group: wgpu::BindGroup,
     histogram_group: wgpu::BindGroup,
@@ -122,10 +126,12 @@ pub struct Develop {
     probe_pipeline: wgpu::ComputePipeline,
     denoise_layout: wgpu::BindGroupLayout,
     denoise_pipeline: wgpu::ComputePipeline,
-    pyramid_layout: wgpu::BindGroupLayout,
-    downsample_pipeline: wgpu::ComputePipeline,
-    blur_h_pipeline: wgpu::ComputePipeline,
-    blur_v_pipeline: wgpu::ComputePipeline,
+    base_layout: wgpu::BindGroupLayout,
+    downsample_source_pipeline: wgpu::ComputePipeline,
+    downsample_stage_pipeline: wgpu::ComputePipeline,
+    box_h_pipeline: wgpu::ComputePipeline,
+    box_v_pipeline: wgpu::ComputePipeline,
+    coefficients_pipeline: wgpu::ComputePipeline,
     finish_layout: wgpu::BindGroupLayout,
     finish_pipeline: wgpu::ComputePipeline,
     histogram_layout: wgpu::BindGroupLayout,
@@ -155,6 +161,10 @@ pub struct Develop {
     wake: Wake,
     /// Develop for Display P3 instead of sRGB (export only; the preview is sRGB).
     pub display_p3: bool,
+    /// Pixels of this render per pixel of the preview the edit was made on (1 for the preview).
+    /// Sharpening and noise reduction reach this many times further, so an export at another
+    /// size treats the same detail the preview showed.
+    pub detail_scale: f32,
     /// Count the histogram after each develop (off for export).
     pub histogram_enabled: bool,
 }
@@ -194,12 +204,20 @@ impl Develop {
         };
         let develop_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("develop"),
-            entries: &[entry(0, cs, texture(false)), entry(1, cs, write), entry(2, cs, uniform), entry(3, cs, storage(true)), entry(4, cs, storage(false))],
+            entries: &[
+                entry(0, cs, texture(false)),
+                entry(1, cs, write),
+                entry(2, cs, uniform),
+                entry(3, cs, storage(true)),
+                entry(4, cs, storage(false)),
+                entry(5, cs, texture(true)),
+                entry(6, cs, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)),
+            ],
         });
         let develop_pipeline = compute("develop", &develop_layout, include_str!("develop.wgsl"), "main");
         let probe_pipeline = compute("probe", &develop_layout, include_str!("develop.wgsl"), "probe");
 
-        // Noise reduction and the definition blur share a shape: read one texture, write another.
+        // Noise reduction and the base's passes share a shape: read one texture, write another.
         let read_write_layout = |label| {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some(label),
@@ -208,15 +226,18 @@ impl Develop {
         };
         let denoise_layout = read_write_layout("denoise");
         let denoise_pipeline = compute("denoise", &denoise_layout, include_str!("denoise.wgsl"), "main");
-        let pyramid_layout = read_write_layout("pyramid");
-        let downsample_pipeline = compute("downsample", &pyramid_layout, include_str!("pyramid.wgsl"), "downsample");
-        let blur_h_pipeline = compute("blur h", &pyramid_layout, include_str!("pyramid.wgsl"), "blur_h");
-        let blur_v_pipeline = compute("blur v", &pyramid_layout, include_str!("pyramid.wgsl"), "blur_v");
+        let base_layout = read_write_layout("base");
+        let base = |label, entry_point| compute(label, &base_layout, include_str!("base.wgsl"), entry_point);
+        let downsample_source_pipeline = base("downsample source", "downsample_source");
+        let downsample_stage_pipeline = base("downsample stage", "downsample_stage");
+        let box_h_pipeline = base("box h", "box_h");
+        let box_v_pipeline = base("box v", "box_v");
+        let coefficients_pipeline = base("coefficients", "coefficients");
 
         let finish_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("finish"),
             entries: &[
-                entry(0, cs, texture(false)),
+                entry(0, cs, texture(true)),
                 entry(1, cs, texture(true)),
                 entry(2, cs, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)),
                 entry(3, cs, write),
@@ -280,10 +301,12 @@ impl Develop {
             probe_pipeline,
             denoise_layout,
             denoise_pipeline,
-            pyramid_layout,
-            downsample_pipeline,
-            blur_h_pipeline,
-            blur_v_pipeline,
+            base_layout,
+            downsample_source_pipeline,
+            downsample_stage_pipeline,
+            box_h_pipeline,
+            box_v_pipeline,
+            coefficients_pipeline,
             finish_layout,
             finish_pipeline,
             histogram_layout,
@@ -308,6 +331,7 @@ impl Develop {
             results,
             wake,
             display_p3: false,
+            detail_scale: 1.0,
             histogram_enabled: true,
         }
     }
@@ -350,8 +374,9 @@ impl Develop {
         let source_view = source.create_view(&Default::default());
         let stage_view = float("photo stage", size);
         let denoised_view = float("photo denoised", size);
-        let quarter_a = float("definition blur a", quarter);
-        let quarter_b = float("definition blur b", quarter);
+        let quarter_a = float("base a", quarter);
+        let quarter_b = float("base b", quarter);
+        let tone_base = float("tone base", quarter);
         let working_view = float("photo working", size);
 
         let view = |v| wgpu::BindingResource::TextureView(v);
@@ -363,13 +388,23 @@ impl Develop {
         let develop_group = group(
             "develop",
             &self.develop_layout,
-            &[view(&source_view), view(&stage_view), params.clone(), self.curves.as_entire_binding(), self.probed.as_entire_binding()],
+            &[
+                view(&source_view),
+                view(&stage_view),
+                params.clone(),
+                self.curves.as_entire_binding(),
+                self.probed.as_entire_binding(),
+                view(&tone_base),
+                wgpu::BindingResource::Sampler(&self.sampler),
+            ],
         );
         let denoise_group = group("denoise", &self.denoise_layout, &[view(&stage_view), view(&denoised_view), params.clone()]);
-        let downsample_group = group("downsample", &self.pyramid_layout, &[view(&stage_view), view(&quarter_a), params.clone()]);
-        let downsample_denoised_group = group("downsample", &self.pyramid_layout, &[view(&denoised_view), view(&quarter_a), params.clone()]);
-        let blur_h_group = group("blur h", &self.pyramid_layout, &[view(&quarter_a), view(&quarter_b), params.clone()]);
-        let blur_v_group = group("blur v", &self.pyramid_layout, &[view(&quarter_b), view(&quarter_a), params.clone()]);
+        let downsample_source_group = group("downsample", &self.base_layout, &[view(&source_view), view(&quarter_a), params.clone()]);
+        let downsample_group = group("downsample", &self.base_layout, &[view(&stage_view), view(&quarter_a), params.clone()]);
+        let downsample_denoised_group = group("downsample", &self.base_layout, &[view(&denoised_view), view(&quarter_a), params.clone()]);
+        let base_ab_group = group("base a to b", &self.base_layout, &[view(&quarter_a), view(&quarter_b), params.clone()]);
+        let base_ba_group = group("base b to a", &self.base_layout, &[view(&quarter_b), view(&quarter_a), params.clone()]);
+        let base_tone_group = group("base b to tone", &self.base_layout, &[view(&quarter_b), view(&tone_base), params.clone()]);
         let sampler = wgpu::BindingResource::Sampler(&self.sampler);
         let finish_group = group("finish", &self.finish_layout, &[view(&stage_view), view(&quarter_a), sampler.clone(), view(&working_view), params.clone()]);
         let finish_denoised_group = group("finish", &self.finish_layout, &[view(&denoised_view), view(&quarter_a), sampler, view(&working_view), params]);
@@ -396,10 +431,12 @@ impl Develop {
             quarter,
             develop_group,
             denoise_group,
+            downsample_source_group,
             downsample_group,
             downsample_denoised_group,
-            blur_h_group,
-            blur_v_group,
+            base_ab_group,
+            base_ba_group,
+            base_tone_group,
             finish_group,
             finish_denoised_group,
             histogram_group,
@@ -439,10 +476,13 @@ impl Develop {
             params.effects[2] = x as f32;
             params.effects[3] = y as f32;
         }
-        params.detail[3] = definition_sigma(photo.quarter);
+        params.detail[3] = base_radius(photo.quarter);
         params.output[0] = if self.display_p3 { 1.0 } else { 0.0 };
+        params.output[1] = self.detail_scale;
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
         let [definition, _, noise, _] = params.detail;
+        // Brilliance, Highlights and Shadows are the adjustments that act on regions.
+        let local_tone = params.light[2] != 0.0 || params.light[3] != 0.0 || params.tone[0] != 0.0;
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("develop") });
         // One compute pass per step, so each reads what the one before it finished writing.
@@ -452,7 +492,23 @@ impl Develop {
             pass.set_bind_group(0, group, &[]);
             pass.dispatch_workgroups(w.div_ceil(per_group), h.div_ceil(per_group), 1);
         };
+        // The steps to the base of whatever `down` reads, left where `last` writes: quarter A
+        // or the tone base.
+        let base = |down_pipeline, down, last| {
+            [
+                ("downsample", down_pipeline, down),
+                ("box h", &self.box_h_pipeline, &photo.base_ab_group),
+                ("coefficients", &self.coefficients_pipeline, &photo.base_ba_group),
+                ("box h", &self.box_h_pipeline, &photo.base_ab_group),
+                ("box v", &self.box_v_pipeline, last),
+            ]
+        };
         if develop {
+            if local_tone {
+                for (label, pipeline, group) in base(&self.downsample_source_pipeline, &photo.downsample_source_group, &photo.base_tone_group) {
+                    run(label, pipeline, group, photo.quarter, 8);
+                }
+            }
             run("develop", &self.develop_pipeline, &photo.develop_group, photo.size, 8);
             let denoised = noise > 0.0;
             if denoised {
@@ -460,9 +516,9 @@ impl Develop {
             }
             if definition != 0.0 {
                 let down = if denoised { &photo.downsample_denoised_group } else { &photo.downsample_group };
-                run("downsample", &self.downsample_pipeline, down, photo.quarter, 8);
-                run("blur h", &self.blur_h_pipeline, &photo.blur_h_group, photo.quarter, 8);
-                run("blur v", &self.blur_v_pipeline, &photo.blur_v_group, photo.quarter, 8);
+                for (label, pipeline, group) in base(&self.downsample_stage_pipeline, down, &photo.base_ba_group) {
+                    run(label, pipeline, group, photo.quarter, 8);
+                }
             }
             let finish = if denoised { &photo.finish_denoised_group } else { &photo.finish_group };
             run("finish", &self.finish_pipeline, finish, photo.size, 8);
@@ -580,10 +636,11 @@ impl Develop {
     }
 }
 
-/// The definition blur's σ in quarter-size pixels: about 1% of the photo's width, so Definition
-/// looks the same at any preview size.
-pub fn definition_sigma(quarter: [u32; 2]) -> f32 {
-    (quarter[0].max(quarter[1]) as f32 / 120.0).clamp(1.5, 10.0)
+/// The edge-aware base's window radius in quarter-size pixels: about 1.7% of the photo's long
+/// edge, so local tone and Definition reach as far at any render size. A guess, set by eye on
+/// one synthetic scene.
+pub fn base_radius(quarter: [u32; 2]) -> f32 {
+    (quarter[0].max(quarter[1]) as f32 / 60.0).round().clamp(2.0, 40.0)
 }
 
 /// `DARKROOM_DEBUG=1` prints what readbacks return.
@@ -615,7 +672,7 @@ pub fn fit_aspect(rect: [f32; 4], size: [f32; 2]) -> [f32; 4] {
 
 #[cfg(test)]
 mod tests {
-    use super::fit;
+    use super::{base_radius, fit};
 
     #[test]
     fn a_wide_photo_letterboxes_into_a_tall_box() {
@@ -625,5 +682,18 @@ mod tests {
     #[test]
     fn a_tall_photo_pillarboxes_into_a_wide_box() {
         assert_eq!(fit([0.0, 0.0, 400.0, 300.0], [2000, 3000]), [100.0, 0.0, 200.0, 300.0]);
+    }
+
+    #[test]
+    fn the_base_reaches_the_same_share_of_the_photo_at_any_size() {
+        assert_eq!(base_radius([375, 250]), 6.0);
+        assert_eq!(base_radius([250, 375]), 6.0);
+        assert_eq!(base_radius([1560, 1040]), 26.0);
+    }
+
+    #[test]
+    fn the_base_radius_stays_within_what_the_shader_can_sample() {
+        assert_eq!(base_radius([40, 30]), 2.0);
+        assert_eq!(base_radius([5000, 3000]), 40.0);
     }
 }

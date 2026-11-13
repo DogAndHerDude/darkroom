@@ -30,6 +30,42 @@ pub fn button(key: impl Into<String>, label: impl Into<String>, press: impl Fn(&
         .child(text(label).font(t::BODY).color(t::INK))
 }
 
+/// The design system's small IconButton. Off, it is faint and takes no press.
+pub fn icon_button(key: &'static str, label: &'static str, icon: fn(Color) -> Shape, enabled: bool, press: fn(&mut State)) -> El {
+    let b = el()
+        .key(key)
+        .role("button")
+        .label(label)
+        .size(24.0, 24.0)
+        .center()
+        .radius(7.0)
+        .disabled(!enabled)
+        .child(canvas(icon(if enabled { t::INK_MUTED } else { t::INK_FAINT })).size(16.0, 16.0));
+    if enabled { b.hover(t::BG_HOVER).on_press(press) } else { b }
+}
+
+/// The design's undo arrow in a 20 × 20 box: an arrowhead at the left of a line that hooks
+/// round and back underneath. `mirror` flips it into redo.
+fn hook_arrow(mirror: bool, color: Color) -> Shape {
+    let at = |[x, y]: [f32; 2]| if mirror { [20.0 - x, y] } else { [x, y] };
+    // The hook is a half circle of radius 4.5 about (11.5, 12.5), from the top round to the bottom.
+    let mut hook = vec![at([4.5, 8.0])];
+    hook.extend((0..=12).map(|i| {
+        let a = std::f32::consts::PI * (i as f32 / 12.0 - 0.5);
+        at([11.5 + 4.5 * a.cos(), 12.5 + 4.5 * a.sin()])
+    }));
+    hook.push(at([9.0, 17.0]));
+    Shape::new().stroke(vec![at([7.5, 4.5]), at([4.0, 8.0]), at([7.5, 11.5])], 1.2, color).stroke(hook, 1.2, color).view_box(20.0, 20.0)
+}
+
+pub fn undo_icon(color: Color) -> Shape {
+    hook_arrow(false, color)
+}
+
+pub fn redo_icon(color: Color) -> Shape {
+    hook_arrow(true, color)
+}
+
 /// The design system's Primary button: the one action a screen exists for.
 pub fn primary(key: &'static str, label: &'static str) -> El {
     el().key(key).role("button").label(label).h(34.0).px(16.0).center().radius(7.0).fill(t::ACCENT).hover(t::ACCENT_HOVER).child(text(label).font(t::BODY_STRONG).color(t::ON_ACCENT))
