@@ -29,6 +29,8 @@ pub struct Params {
     /// Definition (−1..1), sharpening and noise reduction (0..1), and the definition blur's σ in
     /// quarter-size pixels (set per photo by `Develop`).
     pub detail: [f32; 4],
+    /// 1 for Display P3 output, 0 for sRGB (the preview is always sRGB; set by `Develop`).
+    pub output: [f32; 4],
 }
 
 impl Params {
@@ -53,7 +55,7 @@ impl Params {
             (0.0, [0.0; 4])
         };
         let curves = if e.curves.enabled && !e.curves.is_identity() { 1.0 } else { 0.0 };
-        Params { white_balance, light, tone, color, effects: [vignette, curves, 0.0, 0.0], detail }
+        Params { white_balance, light, tone, color, effects: [vignette, curves, 0.0, 0.0], detail, output: [0.0; 4] }
     }
 }
 

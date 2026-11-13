@@ -4,10 +4,9 @@
 use darkroom_core::Edit;
 use rune::{Cursor, Drag, El, Phase, ScrollSpec, SurfaceFit, Tx, col, effect, el, row, spacer, text};
 
-use crate::curves;
 use crate::theme as t;
-use crate::ui::{button, rule, stars, top_bar};
-use crate::{PHOTO_SLOT, State};
+use crate::ui::{button, rule, segmented, stars, top_bar};
+use crate::{PHOTO_SLOT, State, crop, curves};
 
 /// Slider track width: the 300 pt panel less its 12 pt padding on each side.
 const TRACK: f32 = 276.0;
@@ -15,26 +14,28 @@ const TRACK: f32 = 276.0;
 const STRIP_CELL: f32 = 112.0;
 
 #[derive(Clone, Copy)]
-enum Readout {
+pub enum Readout {
     /// +0.35
     Stops,
     /// −18, +12
     Whole,
+    /// −1.8°
+    Degrees,
 }
 
 /// One slider: its range, how its value reads, and where it lives in the edit.
 #[derive(Clone, Copy)]
-struct Adjustment {
-    key: &'static str,
-    label: &'static str,
-    min: f32,
-    max: f32,
-    readout: Readout,
-    get: fn(&Edit) -> f32,
-    set: fn(&mut Edit, f32),
+pub struct Adjustment {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub min: f32,
+    pub max: f32,
+    pub readout: Readout,
+    pub get: fn(&Edit) -> f32,
+    pub set: fn(&mut Edit, f32),
 }
 
-const fn adj(key: &'static str, label: &'static str, get: fn(&Edit) -> f32, set: fn(&mut Edit, f32)) -> Adjustment {
+pub const fn adj(key: &'static str, label: &'static str, get: fn(&Edit) -> f32, set: fn(&mut Edit, f32)) -> Adjustment {
     Adjustment { key, label, min: -100.0, max: 100.0, readout: Readout::Whole, get, set }
 }
 
@@ -63,8 +64,11 @@ const DETAIL: [Adjustment; 4] = [
 ];
 
 pub fn view(s: &State) -> El {
-    let mut photo = effect(PHOTO_SLOT).key("photo").w_full().grow(1.0);
-    if s.picker.is_some() {
+    let (shown, _) = s.view_geometry();
+    let mut photo = effect(PHOTO_SLOT).key("photo").aspect_fit(shown[0] / shown[1]);
+    if s.cropping {
+        photo = crop::overlay(s, photo);
+    } else if s.picker.is_some() {
         photo = photo.cursor(Cursor::Crosshair).on_drag(|s: &mut State, g: &mut Drag, _tx: &mut Tx| {
             if g.phase == Phase::Down {
                 pick(s, g);
@@ -81,21 +85,25 @@ pub fn view(s: &State) -> El {
     let left = col().grow(1.0).shrink().min_w(0.0).h_full().child(stage).children(filmstrip(s));
 
     let e = &s.edit;
-    let sections = col()
-        .key("sections")
-        .w_full()
-        .grow(1.0)
-        .min_h(0.0)
-        .scroll(ScrollSpec { stick_bottom: false })
-        .child(section("light", "Light", e.light.enabled, |e| e.light.enabled = !e.light.enabled, sliders(&LIGHT, e)))
-        .child(section("color", "Color", e.color.enabled, |e| e.color.enabled = !e.color.enabled, sliders(&COLOR, e)))
-        .child(section("curves", "Curves", e.curves.enabled, |e| e.curves.enabled = !e.curves.enabled, curves::body(s)))
-        .child(section("detail", "Detail", e.detail.enabled, |e| e.detail.enabled = !e.detail.enabled, sliders(&DETAIL, e)));
+    let sections = col().key("sections").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false });
+    let sections = if s.cropping {
+        sections.child(crop::panel(s))
+    } else {
+        sections
+            .child(section("light", "Light", e.light.enabled, |e| e.light.enabled = !e.light.enabled, sliders(&LIGHT, e)))
+            .child(section("color", "Color", e.color.enabled, |e| e.color.enabled = !e.color.enabled, sliders(&COLOR, e)))
+            .child(section("curves", "Curves", e.curves.enabled, |e| e.curves.enabled = !e.curves.enabled, curves::body(s)))
+            .child(section("detail", "Detail", e.detail.enabled, |e| e.detail.enabled = !e.detail.enabled, sliders(&DETAIL, e)))
+    };
 
+    let tools = segmented("tool", &[(false, "Adjust"), (true, "Crop")], s.cropping, |s, on| s.set_cropping(on));
     let header = row()
         .w_full()
         .padding(12.0)
-        .child(col().gap(2.0).child(text(s.status.clone()).font(t::CAPTION).color(t::INK_MUTED)))
+        .gap(8.0)
+        .center_y()
+        .child(tools)
+        .child(col().gap(2.0).shrink().child(text(s.status.clone()).font(t::CAPTION).color(t::INK_MUTED).truncate_fade()))
         .child(spacer())
         .child(stars(e.rating, 12.0));
 
@@ -163,12 +171,13 @@ fn filmstrip(s: &State) -> Option<El> {
     Some(col().w_full().h(112.0).child(rule()).child(el().w_full().grow(1.0).scroll_x().child(strip)))
 }
 
-/// A click on the photo while a picker is active: probe the pixel under it.
+/// A click on the photo while a picker is active: probe the pixel under it. The slot is the
+/// output exactly, so the click maps through the geometry to the source.
 fn pick(s: &mut State, g: &Drag) {
     let Some(picker) = s.picker else { return };
     let size = s.photo.size;
-    let [fx, fy, fw, fh] = darkroom_render::fit([0.0, 0.0, g.w, g.h], size);
-    let (u, v) = ((g.x - fx) / fw, (g.y - fy) / fh);
+    let (_, map) = s.view_geometry();
+    let [u, v] = darkroom_core::geometry::apply(map, [g.x / g.w.max(1.0), g.y / g.h.max(1.0)]);
     if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
         return;
     }
@@ -221,6 +230,8 @@ fn readout(r: Readout, v: f32) -> String {
         Readout::Stops => format!("{v:+.2}"),
         Readout::Whole if v.round() == 0.0 => "0".to_owned(),
         Readout::Whole => format!("{:+.0}", v.round()),
+        Readout::Degrees if v.abs() < 0.05 => "0°".to_owned(),
+        Readout::Degrees => format!("{v:+.1}°"),
     };
     // A real minus sign, as the design system asks.
     s.replace('-', "−")
@@ -229,7 +240,7 @@ fn readout(r: Readout, v: f32) -> String {
 /// The design system's AdjustSlider: label and value over a track whose accent fill runs from
 /// zero (centre for bipolar sliders, left for unipolar) to the thumb. Drag or click to set,
 /// double-click to reset; the edit saves when the pointer lifts.
-fn slider(a: Adjustment, value: f32) -> El {
+pub fn slider(a: Adjustment, value: f32) -> El {
     let span = a.max - a.min;
     let frac = ((value - a.min) / span).clamp(0.0, 1.0);
     let zero = ((0.0 - a.min) / span).clamp(0.0, 1.0);

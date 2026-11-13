@@ -7,6 +7,7 @@
 pub mod curve;
 pub mod edit;
 pub mod exif;
+pub mod geometry;
 pub mod library;
 pub mod sidecar;
 

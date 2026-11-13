@@ -98,4 +98,5 @@ pub fn top_bar(s: &State, title: String, right: El) -> El {
         .child(text(title).font(t::BODY_STRONG).color(t::INK))
         .child(spacer())
         .child(right)
+        .child(button("export", "Export…", |s| s.export_scope = Some(crate::export::Scope::Shown)))
 }

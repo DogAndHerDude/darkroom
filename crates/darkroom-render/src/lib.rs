@@ -9,6 +9,7 @@
 //! arrives in [`Results`] from a background thread, which then calls the wake function so the
 //! UI picks it up.
 
+mod export;
 mod params;
 mod readback;
 
@@ -17,6 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use darkroom_core::{Curves, Edit};
 
+pub use export::Exported;
 pub use params::Params;
 use readback::Readback;
 
@@ -68,6 +70,12 @@ pub struct Placement {
     pub format: wgpu::TextureFormat,
     /// Encode to sRGB in the shader (the frame blends sRGB-encoded values in a non-sRGB target).
     pub encode_srgb: bool,
+    /// What's shown: its size (for its proportions) and the map from it to the photo
+    /// (`Geometry::output_to_source`, or the uncropped canvas while cropping).
+    pub output: [f32; 2],
+    pub map: [f32; 6],
+    /// Linear RGB shown off the photo, where a straightened photo's corners turn away.
+    pub background: [f32; 3],
 }
 
 #[repr(C)]
@@ -75,6 +83,9 @@ pub struct Placement {
 struct PresentUniform {
     ndc: [f32; 4],
     encode: [f32; 4],
+    map_abcd: [f32; 4],
+    map_ef: [f32; 4],
+    background: [f32; 4],
 }
 
 const WORKING_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -101,6 +112,8 @@ struct Photo {
     finish_denoised_group: wgpu::BindGroup,
     histogram_group: wgpu::BindGroup,
     present_group: wgpu::BindGroup,
+    /// The developed result, for export.
+    working: wgpu::TextureView,
 }
 
 pub struct Develop {
@@ -140,6 +153,10 @@ pub struct Develop {
     pending_probe: Option<(u64, [u32; 2])>,
     results: Arc<Results>,
     wake: Wake,
+    /// Develop for Display P3 instead of sRGB (export only; the preview is sRGB).
+    pub display_p3: bool,
+    /// Count the histogram after each develop (off for export).
+    pub histogram_enabled: bool,
 }
 
 impl Develop {
@@ -290,6 +307,8 @@ impl Develop {
             pending_probe: None,
             results,
             wake,
+            display_p3: false,
+            histogram_enabled: true,
         }
     }
 
@@ -380,6 +399,7 @@ impl Develop {
             finish_denoised_group,
             histogram_group,
             present_group,
+            working: working_view,
         });
         self.developed = None;
     }
@@ -398,7 +418,7 @@ impl Develop {
         let Some(photo) = &self.photo else { return };
         let develop = self.developed.as_ref() != Some(edit);
         let probe = self.pending_probe.filter(|_| self.probe_readback.is_idle());
-        self.histogram_stale |= develop;
+        self.histogram_stale |= develop && self.histogram_enabled;
         let histogram = self.histogram_stale && self.histogram_readback.is_idle();
         if !develop && probe.is_none() && !histogram {
             return;
@@ -415,6 +435,7 @@ impl Develop {
             params.effects[3] = y as f32;
         }
         params.detail[3] = definition_sigma(photo.quarter);
+        params.output[0] = if self.display_p3 { 1.0 } else { 0.0 };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
         let [definition, _, noise, _] = params.detail;
 
@@ -466,7 +487,9 @@ impl Develop {
             self.histogram_stale = false;
             let (results, wake) = (self.results.clone(), self.wake.clone());
             self.histogram_readback.start(device, move |bytes| {
-                let counts: &[u32] = bytemuck::cast_slice(&bytes);
+                let Some(bytes) = bytes else { return };
+                // Read by value: a byte Vec isn't guaranteed to be aligned for u32.
+                let counts: Vec<u32> = bytes.chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
                 if debug() {
                     let total: u64 = counts[..256].iter().map(|&c| c as u64).sum();
                     eprintln!("darkroom: histogram readback, {} bytes, {total} pixels", bytes.len());
@@ -485,7 +508,8 @@ impl Develop {
             self.pending_probe = None;
             let (results, wake) = (self.results.clone(), self.wake.clone());
             self.probe_readback.start(device, move |bytes| {
-                let v: &[f32] = bytemuck::cast_slice(&bytes);
+                let Some(bytes) = bytes else { return };
+                let v: Vec<f32> = bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
                 if debug() {
                     eprintln!("darkroom: probe readback {v:?}");
                 }
@@ -532,10 +556,18 @@ impl Develop {
     /// travels in one uniform.
     pub fn draw(&self, queue: &wgpu::Queue, pass: &mut wgpu::RenderPass<'_>, at: Placement) {
         let (Some(photo), Some(pipeline)) = (&self.photo, self.present_pipelines.get(&at.format)) else { return };
-        let [x, y, w, h] = fit(at.rect, photo.size);
+        let [x, y, w, h] = fit_aspect(at.rect, at.output);
         let (tw, th) = (at.target[0] as f32, at.target[1] as f32);
         let ndc = [x / tw * 2.0 - 1.0, 1.0 - y / th * 2.0, (x + w) / tw * 2.0 - 1.0, 1.0 - (y + h) / th * 2.0];
-        let uniform = PresentUniform { ndc, encode: [if at.encode_srgb { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0] };
+        let [a, b, c, d, e, f] = at.map;
+        let [r, g, bl] = at.background;
+        let uniform = PresentUniform {
+            ndc,
+            encode: [if at.encode_srgb { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+            map_abcd: [a, b, c, d],
+            map_ef: [e, f, 0.0, 0.0],
+            background: [r, g, bl, 1.0],
+        };
         queue.write_buffer(&self.present_uniform, 0, bytemuck::bytes_of(&uniform));
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &photo.present_group, &[]);
@@ -556,9 +588,14 @@ fn debug() -> bool {
 
 /// `size` scaled to fit inside `rect` and centred in it, snapped to whole pixels.
 pub fn fit(rect: [f32; 4], size: [u32; 2]) -> [f32; 4] {
+    fit_aspect(rect, size.map(|v| v as f32))
+}
+
+/// [`fit`] for a size given as floats (only its proportions matter).
+pub fn fit_aspect(rect: [f32; 4], size: [f32; 2]) -> [f32; 4] {
     let [x, y, w, h] = rect;
-    let k = (w / size[0] as f32).min(h / size[1] as f32);
-    let (fw, fh) = ((size[0] as f32 * k).round(), (size[1] as f32 * k).round());
+    let k = (w / size[0]).min(h / size[1]);
+    let (fw, fh) = ((size[0] * k).round(), (size[1] * k).round());
     [(x + (w - fw) / 2.0).round(), (y + (h - fh) / 2.0).round(), fw, fh]
 }
 

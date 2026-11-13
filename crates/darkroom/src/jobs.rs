@@ -27,6 +27,31 @@ pub enum Msg {
     Folder { generation: u64, folder: PathBuf, entries: Vec<Entry> },
     Thumb { path: PathBuf, width: u32, height: u32, rgba: Vec<u8> },
     Opened { path: PathBuf, result: Result<Box<(Photo, Edit)>, String> },
+    /// A photo decoded at export size, ready for the GPU.
+    ExportPrepared { run: u64, index: usize, result: Result<Box<Prepared>, String> },
+    /// A photo written (or not) by an export.
+    Exported { run: u64, index: usize, result: Result<PathBuf, String> },
+}
+
+/// A photo ready to render for export: its pixels at export size (sRGB RGBA8) and its edit.
+pub struct Prepared {
+    pub path: PathBuf,
+    pub size: [u32; 2],
+    pub rgba: Vec<u8>,
+    pub edit: Edit,
+}
+
+/// Posts messages from any thread, waking the window.
+#[derive(Clone)]
+pub struct Deliver {
+    inbox: Arc<Mutex<Vec<Msg>>>,
+    waker: Arc<Mutex<Option<Waker>>>,
+}
+
+impl Deliver {
+    pub fn send(&self, msg: Msg) {
+        deliver(&self.inbox, &self.waker, msg);
+    }
 }
 
 struct ThumbJob {
@@ -108,6 +133,19 @@ impl Jobs {
         }
     }
 
+    pub fn deliverer(&self) -> Deliver {
+        Deliver { inbox: self.inbox.clone(), waker: self.waker.clone() }
+    }
+
+    /// Decodes a photo at full resolution for export, scaled down first so its output's long
+    /// edge is at most `long_edge`.
+    pub fn prepare_export(&self, run: u64, index: usize, path: PathBuf, long_edge: Option<u32>) {
+        self.spawn("export", move || {
+            let result = prepare(&path, long_edge).map(Box::new);
+            Msg::ExportPrepared { run, index, result }
+        });
+    }
+
     /// Opens a photo for Develop: decodes its preview and reads its edit.
     pub fn open(&self, path: PathBuf) {
         self.spawn("open", move || {
@@ -118,6 +156,26 @@ impl Jobs {
             Msg::Opened { path, result }
         });
     }
+}
+
+fn prepare(path: &Path, long_edge: Option<u32>) -> Result<Prepared, String> {
+    let edit = sidecar::load(path).map_err(|e| format!("its edit file is unreadable: {e}"))?;
+    let mut decoder = ImageReader::open(path).and_then(|r| r.with_guessed_format()).map_err(|e| e.to_string())?.into_decoder().map_err(|e| e.to_string())?;
+    let orientation = decoder.orientation().map_err(|e| e.to_string())?;
+    let mut img = DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
+    img.apply_orientation(orientation);
+    let full = [img.width(), img.height()];
+    if let Some(limit) = long_edge {
+        // Scale so the output (after crop) has the long edge asked for; never enlarge.
+        let out = edit.geometry.output_size(full);
+        let k = limit as f32 / out[0].max(out[1]) as f32;
+        if k < 1.0 {
+            let (w, h) = (((full[0] as f32 * k).round() as u32).max(1), ((full[1] as f32 * k).round() as u32).max(1));
+            img = img.resize_exact(w, h, image::imageops::FilterType::CatmullRom);
+        }
+    }
+    let rgba = img.into_rgba8();
+    Ok(Prepared { path: path.to_owned(), size: [rgba.width(), rgba.height()], rgba: rgba.into_raw(), edit })
 }
 
 fn deliver(inbox: &Mutex<Vec<Msg>>, waker: &Mutex<Option<Waker>>, msg: Msg) {

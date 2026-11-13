@@ -5,8 +5,10 @@
 //! `cargo run -p darkroom -- path/to/folder` browses that folder; `-- path/to/photo.jpg` opens a
 //! photo in Develop. `DARKROOM_NO_PREFS=1` ignores and keeps no saved settings (for tests).
 
+mod crop;
 mod curves;
 mod develop;
+mod export;
 mod jobs;
 mod library;
 mod photo;
@@ -18,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use darkroom_core::library::{Entry, Filter, Folder, Sort};
+use darkroom_core::geometry::Affine;
 use darkroom_core::{Channel, Curve, Edit, Flag, sidecar};
 use darkroom_render::{Develop, Histogram, Placement, Results};
 use rune::compose::DeviceKey;
@@ -25,7 +28,7 @@ use rune::prefs::Prefs;
 use rune::{AppSpec, Compositor, Cx, El, Frame, Image, ImageCache, Key, KeyEvent, Tx, Waker};
 
 use crate::curves::Picker;
-use crate::jobs::{Jobs, Msg};
+use crate::jobs::{Jobs, Msg, Prepared};
 use crate::photo::Photo;
 
 /// The effect slot the photo is drawn into.
@@ -76,6 +79,12 @@ struct State {
     curve_point: Option<usize>,
     /// The selected point is being dragged off the graph and goes on release.
     curve_removing: bool,
+    /// The crop tool is open.
+    cropping: bool,
+    /// The crop tool's aspect: width over height, `crop::ORIGINAL`, or None for free.
+    crop_aspect: Option<f32>,
+    /// The crop when the current drag on its frame began.
+    crop_start: Option<[f32; 4]>,
     /// The active curve point picker: the next click on the photo sets points from that pixel.
     picker: Option<Picker>,
     /// A pixel the compositor should probe: (request id, photo pixel).
@@ -89,6 +98,15 @@ struct State {
     results: Arc<Results>,
     /// Wakes the window when results arrive; set in `setup`.
     waker: Option<Waker>,
+
+    // Export.
+    export_settings: export::Settings,
+    /// The export dialog is open, for these photos.
+    export_scope: Option<export::Scope>,
+    export_run: Option<export::Run>,
+    next_export_run: u64,
+    /// A photo decoded for export, waiting for the compositor (which has the GPU) to render it.
+    export_gpu: Option<(u64, usize, Box<Prepared>)>,
 }
 
 impl State {
@@ -109,6 +127,72 @@ impl State {
         if let Some(e) = self.entries.iter_mut().find(|e| e.path == path) {
             (e.rating, e.flag, e.edited) = (rating, flag, edited);
         }
+    }
+
+    /// What the photo slot shows: its size in preview pixels and the map from it to the photo.
+    /// The cropped output, or while cropping the whole straightened canvas.
+    fn view_geometry(&self) -> ([f32; 2], Affine) {
+        let g = &self.shown().geometry;
+        let source = self.photo.size;
+        if self.cropping {
+            (g.oriented_size(source), g.rect_to_source(source, [0.0, 0.0, 1.0, 1.0]))
+        } else {
+            (g.output_size(source).map(|v| v as f32), g.output_to_source(source))
+        }
+    }
+
+    fn set_cropping(&mut self, on: bool) {
+        self.cropping = on;
+        self.picker = None;
+        if !on {
+            self.crop_start = None;
+        }
+    }
+
+    /// The photos an export of `scope` would write.
+    fn export_paths(&self, scope: export::Scope) -> Vec<PathBuf> {
+        match scope {
+            export::Scope::One => self.target().into_iter().collect(),
+            export::Scope::Shown => self.visible().into_iter().map(|i| self.entries[i].path.clone()).collect(),
+        }
+    }
+
+    fn start_export(&mut self, scope: export::Scope) {
+        let paths = self.export_paths(scope);
+        if paths.is_empty() {
+            self.export_scope = None;
+            return;
+        }
+        let _ = self.prefs.set("export", &self.export_settings);
+        self.next_export_run += 1;
+        let run = export::Run {
+            id: self.next_export_run,
+            destination: self.export_settings.destination_for(self.folder.as_deref()),
+            settings: self.export_settings.clone(),
+            paths,
+            next: 0,
+            written: Vec::new(),
+            failed: Vec::new(),
+        };
+        self.export_run = Some(run);
+        self.export_next();
+    }
+
+    /// Starts the run's next photo; one at a time keeps memory to one full-size photo.
+    fn export_next(&mut self) {
+        let Some(run) = &mut self.export_run else { return };
+        let Some(path) = run.paths.get(run.next).cloned() else { return };
+        let index = run.next;
+        run.next += 1;
+        self.jobs.prepare_export(run.id, index, path, run.settings.long_edge);
+    }
+
+    fn export_failed(&mut self, index: usize, error: String) {
+        if let Some(run) = &mut self.export_run {
+            let name = run.paths.get(index).and_then(|p| p.file_name()).map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            run.failed.push(format!("Couldn't export {name}: {error}"));
+        }
+        self.export_next();
     }
 
     /// Indices into `entries` the grid and filmstrip show, in order.
@@ -252,6 +336,29 @@ impl State {
                     self.thumbs.insert(path, images.rgba(width, height, rgba));
                 }
             }
+            Msg::ExportPrepared { run, index, result } => {
+                if self.export_run.as_ref().map(|r| r.id) != Some(run) {
+                    return;
+                }
+                match result {
+                    Ok(prepared) => self.export_gpu = Some((run, index, prepared)),
+                    Err(e) => self.export_failed(index, e),
+                }
+            }
+            Msg::Exported { run, index, result } => {
+                if self.export_run.as_ref().map(|r| r.id) != Some(run) {
+                    return;
+                }
+                match result {
+                    Ok(path) => {
+                        if let Some(r) = &mut self.export_run {
+                            r.written.push(path);
+                        }
+                        self.export_next();
+                    }
+                    Err(e) => self.export_failed(index, e),
+                }
+            }
             Msg::Opened { path, result } => {
                 if self.opening.as_ref() != Some(&path) {
                     return;
@@ -267,6 +374,7 @@ impl State {
                         self.path = Some(path);
                         self.show_original = false;
                         (self.curve_point, self.curve_removing, self.picker, self.probe_for) = (None, false, None, None);
+                        (self.cropping, self.crop_start) = (false, None);
                     }
                     Err(e) => {
                         let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
@@ -307,13 +415,22 @@ fn init() -> State {
         curve_channel: Channel::Rgb,
         curve_point: None,
         curve_removing: false,
+        cropping: false,
+        crop_aspect: None,
+        crop_start: None,
         picker: None,
         probe_request: None,
         probe_for: None,
         next_probe: 1,
         results: Arc::new(Results::default()),
         waker: None,
+        export_settings: export::Settings::default(),
+        export_scope: None,
+        export_run: None,
+        next_export_run: 0,
+        export_gpu: None,
     };
+    s.export_settings = s.prefs.get("export").unwrap_or_default();
     s.thumb_size = s.prefs.get("thumb_size").unwrap_or(s.thumb_size).clamp(library::THUMB_MIN, library::THUMB_MAX);
 
     match rune::tooling::extra_args().first().map(PathBuf::from) {
@@ -388,6 +505,9 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     match &ev.key {
         Key::Left => s.step(-1),
         Key::Right => s.step(1),
+        Key::Escape if s.export_scope.is_some() && s.export_run.is_none() => s.export_scope = None,
+        _ if s.export_scope.is_some() || s.export_run.is_some() => return false,
+        Key::Enter | Key::Escape if s.cropping => s.set_cropping(false),
         Key::Enter if s.module == Module::Library => s.switch_to(Module::Develop),
         Key::Escape if s.module == Module::Develop => s.module = Module::Library,
         Key::Text(t) => {
@@ -399,6 +519,7 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
                 ("u", Some(p)) => s.set_flag(&p, Flag::None),
                 ("g", _) => s.module = Module::Library,
                 ("d", _) => s.switch_to(Module::Develop),
+                ("c", _) if s.module == Module::Develop => s.set_cropping(!s.cropping),
                 _ => return false,
             }
         }
@@ -408,10 +529,11 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
 }
 
 fn view(s: &State, _: &mut Cx<State>) -> El {
-    match s.module {
+    let module = match s.module {
         Module::Library => library::view(s),
         Module::Develop => develop::view(s),
-    }
+    };
+    rune::el().w_full().h_full().child(module).children(export::dialog(s))
 }
 
 // ---- drawing ----------------------------------------------------------------------------------
@@ -433,6 +555,28 @@ impl Compositor<State> for Preview {
         }
         let develop = &mut self.gpu.as_mut().expect("made above").1;
 
+        // An export's photo: develop it at export size on a Develop of its own, render it through
+        // its geometry, and write the file from the readback thread.
+        if let Some((run, index, prepared)) = f.rt.state.export_gpu.take() {
+            let s = &f.rt.state;
+            let settings = s.export_run.as_ref().map(|r| (r.settings.clone(), r.destination.clone()));
+            if let Some((settings, destination)) = settings {
+                let deliver = s.jobs.deliverer();
+                let mut gpu = Develop::new(f.device, Arc::new(Results::default()), Arc::new(|| {}));
+                gpu.histogram_enabled = false;
+                gpu.display_p3 = settings.display_p3;
+                gpu.set_photo(f.device, f.queue, u64::MAX - index as u64, prepared.size, &prepared.rgba);
+                gpu.update(f.device, f.queue, &prepared.edit);
+                let g = &prepared.edit.geometry;
+                let (map, out) = (g.output_to_source(prepared.size), g.output_size(prepared.size));
+                let source = prepared.path.clone();
+                gpu.export(f.device, f.queue, map, out, move |rendered| {
+                    let result = rendered.and_then(|image| export::write(&image, &source, &destination, &settings));
+                    deliver.send(Msg::Exported { run, index, result });
+                });
+            }
+        }
+
         let s = &mut f.rt.state;
         if s.module == Module::Develop {
             if develop.photo_id() != Some(s.photo.id) {
@@ -444,6 +588,7 @@ impl Compositor<State> for Preview {
             develop.update(f.device, f.queue, &s.shown());
         }
 
+        let (output, map) = f.rt.state.view_geometry();
         let (device, queue, clear) = (f.device, f.queue, f.rt.clear_color());
         f.ui.prepare(device, queue, &mut f.rt.text.atlas, &f.rt.instances, f.size);
         f.ui.draw_with(f.encoder, f.target, clear, &mut |pass, site| {
@@ -453,7 +598,12 @@ impl Compositor<State> for Preview {
             develop.prepare_format(device, site.format);
             let [x, y, w, h] = site.instance.rect;
             let rect = [x - site.origin[0], y - site.origin[1], w, h];
-            develop.draw(queue, pass, Placement { rect, target: site.size, format: site.format, encode_srgb: site.srgb_blend });
+            let c = theme::BG_CANVAS;
+            develop.draw(
+                queue,
+                pass,
+                Placement { rect, target: site.size, format: site.format, encode_srgb: site.srgb_blend, output, map, background: [c.r, c.g, c.b] },
+            );
         });
     }
 }
@@ -509,6 +659,15 @@ fn main() {
             ("warm", |s: &mut State| {
                 develop_scene(s);
                 s.edit.color.temperature = 70.0;
+            }),
+            ("crop", |s: &mut State| {
+                develop_scene(s);
+                s.edit.geometry.straighten = 8.0;
+                s.cropping = true;
+            }),
+            ("cropped", |s: &mut State| {
+                develop_scene(s);
+                s.edit.geometry = darkroom_core::Geometry { straighten: 8.0, crop: Some([0.15, 0.1, 0.5, 0.7]), quarter_turns: 1, ..Default::default() };
             }),
             ("hidden", |s: &mut State| {
                 develop_scene(s);

@@ -59,3 +59,5 @@ pub const ACCENT_INK: Color = Color { r: 0.838799, g: 0.450786, b: 0.274677, a: 
 pub const ACCENT_HOVER: Color = Color { r: 0.830770, g: 0.456411, b: 0.278894, a: 1.0 };
 /// `on-accent` #24170e
 pub const ON_ACCENT: Color = Color { r: 0.017642, g: 0.008568, b: 0.004391, a: 1.0 };
+/// `danger-ink` #ff8a80
+pub const DANGER_INK: Color = Color { r: 1.000000, g: 0.254152, b: 0.215861, a: 1.0 };

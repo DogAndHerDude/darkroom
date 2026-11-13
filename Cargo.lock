@@ -682,8 +682,11 @@ dependencies = [
  "blake3",
  "darkroom-core",
  "darkroom-render",
+ "half",
  "image",
+ "kamadak-exif",
  "rune",
+ "serde",
  "wgpu",
 ]
 

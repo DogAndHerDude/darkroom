@@ -39,9 +39,20 @@ impl Readback {
         encoder.copy_buffer_to_buffer(source, 0, &self.buffer, 0, self.size);
     }
 
+    /// Records a copy of `rows` rows of `texture` from row `y`, each padded to
+    /// `bytes_per_row` (a multiple of 256), into the buffer.
+    pub fn copy_rows(&self, encoder: &mut wgpu::CommandEncoder, texture: &wgpu::Texture, y: u32, rows: u32, bytes_per_row: u32) {
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d { x: 0, y, z: 0 }, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo { buffer: &self.buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(bytes_per_row), rows_per_image: Some(rows) } },
+            wgpu::Extent3d { width: texture.width(), height: rows, depth_or_array_layers: 1 },
+        );
+    }
+
     /// Maps the buffer once the GPU has run the submitted copy, then calls `done` with its bytes
-    /// from another thread. Call after submitting the encoder that holds the copy.
-    pub fn start(&self, device: &wgpu::Device, done: impl FnOnce(Vec<u8>) + Send + 'static) {
+    /// (None if the GPU never finished) from another thread. Call after submitting the encoder
+    /// that holds the copy.
+    pub fn start(&self, device: &wgpu::Device, done: impl FnOnce(Option<Vec<u8>>) + Send + 'static) {
         self.busy.store(true, Ordering::Release);
         let (device, buffer, busy) = (device.clone(), self.buffer.clone(), self.busy.clone());
         std::thread::spawn(move || {
@@ -72,13 +83,12 @@ impl Readback {
                 let bytes = buffer.get_mapped_range(..).map(|view| view.to_vec()).unwrap_or_default();
                 buffer.unmap();
                 busy.store(false, Ordering::Release);
-                if !bytes.is_empty() {
-                    done(bytes);
-                }
+                done((!bytes.is_empty()).then_some(bytes));
             } else {
                 // Never mapped: leave the buffer busy rather than risk writing a pending map.
                 // The next device (or app start) makes a new one.
                 eprintln!("darkroom: a GPU readback didn't finish within {TIMEOUT:?}");
+                done(None);
             }
         });
     }

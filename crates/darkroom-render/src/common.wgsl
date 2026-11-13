@@ -8,6 +8,7 @@ struct Params {
     color: vec4<f32>,         // saturation, vibrance
     effects: vec4<f32>,       // vignette, curves on, probe x, probe y
     detail: vec4<f32>,        // definition (−1..1), sharpening, noise reduction (0..1), definition blur σ in quarter-size pixels
+    output: vec4<f32>,        // x: 1 for Display P3 output, 0 for sRGB
 }
 
 const LUMA: vec3<f32> = vec3<f32>(0.2627, 0.6780, 0.0593); // Rec.2020
@@ -91,33 +92,69 @@ fn oklab_to_srgb(lab: vec3<f32>) -> vec3<f32> {
     );
 }
 
+fn rec2020_to_p3(c: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        dot(c, vec3<f32>(1.3435783, -0.2821797, -0.0613986)),
+        dot(c, vec3<f32>(-0.0652975, 1.0757879, -0.0104905)),
+        dot(c, vec3<f32>(0.0028218, -0.0195985, 1.0167767)),
+    );
+}
+
+fn srgb_to_p3(c: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        dot(c, vec3<f32>(0.8224621, 0.1775380, 0.0)),
+        dot(c, vec3<f32>(0.0331941, 0.9668058, 0.0)),
+        dot(c, vec3<f32>(0.0170827, 0.0723974, 0.9105199)),
+    );
+}
+
 // ---- output ---------------------------------------------------------------------------------
 
-// Rec.2020 working values to display-referred linear sRGB in 0..1.
-fn output(c_in: vec3<f32>) -> vec3<f32> {
-    var c = rec2020_to_srgb(c_in);
+// A colour in Oklab expressed in the output space: sRGB, or Display P3 when `p3`. Oklab is
+// defined from linear sRGB, which holds any colour unbounded, so P3 goes through it.
+fn oklab_to_output(lab: vec3<f32>, p3: bool) -> vec3<f32> {
+    let c = oklab_to_srgb(lab);
+    if p3 { return srgb_to_p3(c); }
+    return c;
+}
+
+// Rec.2020 working values to display-referred linear values in 0..1, in sRGB or (`p3`) Display
+// P3 primaries.
+fn output(c_in: vec3<f32>, p3: bool) -> vec3<f32> {
+    var c = select(rec2020_to_srgb(c_in), rec2020_to_p3(c_in), p3);
     // Colours already in range are untouched, so an unedited photo comes out exactly as it went
     // in. Tiny overshoots are round-off from the colour-space trips and are just clamped.
     //
     // Past white: scale all three channels down by the brightest, which keeps hue and
     // saturation (a bright yellow stays yellow rather than clipping into a band).
     let m = max(c.r, max(c.g, c.b));
-    let brightness = max(dot(c, LUMA_SRGB), 0.0);
+    // Display P3's luminance weights; sRGB's otherwise.
+    let brightness = max(dot(c, select(LUMA_SRGB, vec3<f32>(0.2290, 0.6917, 0.0793), p3)), 0.0);
     if m > 1.0 {
         c = c / m;
     }
     // Too saturated for sRGB: lose chroma at constant Oklab lightness and hue until no channel
     // is negative (a bisection on the chroma scale).
     if min(c.r, min(c.g, c.b)) < -GAMUT_SLACK {
-        let lab = srgb_to_oklab(c);
+        // Oklab works from linear sRGB; a P3 colour converts there first (the inverse of
+        // srgb_to_p3).
+        var srgb = c;
+        if p3 {
+            srgb = vec3<f32>(
+                dot(c, vec3<f32>(1.2249401, -0.2249404, 0.0)),
+                dot(c, vec3<f32>(-0.0420569, 1.0420571, 0.0)),
+                dot(c, vec3<f32>(-0.0196376, -0.0786361, 1.0982735)),
+            );
+        }
+        let lab = srgb_to_oklab(srgb);
         var lo = 0.0;
         var hi = 1.0;
         for (var i = 0; i < 14; i++) {
             let k = (lo + hi) * 0.5;
-            let t = oklab_to_srgb(vec3<f32>(lab.x, lab.yz * k));
+            let t = oklab_to_output(vec3<f32>(lab.x, lab.yz * k), p3);
             if min(t.r, min(t.g, t.b)) < -GAMUT_SLACK { hi = k; } else { lo = k; }
         }
-        c = oklab_to_srgb(vec3<f32>(lab.x, lab.yz * lo));
+        c = oklab_to_output(vec3<f32>(lab.x, lab.yz * lo), p3);
     }
     // Far past white, a colour burns out: it fades towards white with how far its luminance
     // went over, gently at first, so slightly over-bright colours keep theirs. Luminance, not

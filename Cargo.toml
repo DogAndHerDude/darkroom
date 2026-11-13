@@ -14,7 +14,8 @@ rune = { git = "https://github.com/anomalyco/rune", rev = "740ecbc96902fe0008745
 # Must stay on RUNE's wgpu so our textures and pipelines live on the device RUNE hands us.
 wgpu = { version = "~30.0.1", default-features = false, features = ["std", "wgsl"] }
 bytemuck = { version = "1", features = ["derive"] }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff"] }
+half = "2"
 kamadak-exif = "0.6"
 blake3 = "1"
 serde = { version = "1", features = ["derive"] }

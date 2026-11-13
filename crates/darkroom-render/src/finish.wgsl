@@ -76,5 +76,5 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     c = vignette(c, uv, f32(size.x) / f32(size.y));
-    textureStore(working, at, vec4<f32>(output(c), 1.0));
+    textureStore(working, at, vec4<f32>(output(c, p.output.x > 0.5), 1.0));
 }

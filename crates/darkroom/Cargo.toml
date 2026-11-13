@@ -12,3 +12,6 @@ image.workspace = true
 darkroom-core.workspace = true
 darkroom-render.workspace = true
 blake3.workspace = true
+half.workspace = true
+kamadak-exif.workspace = true
+serde.workspace = true
