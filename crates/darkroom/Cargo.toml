@@ -11,3 +11,4 @@ wgpu.workspace = true
 image.workspace = true
 darkroom-core.workspace = true
 darkroom-render.workspace = true
+blake3.workspace = true

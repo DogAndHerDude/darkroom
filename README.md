@@ -29,16 +29,24 @@ Phase: **implementation.** Spec, design system and initial screens are done.
 | Vignette | Working |
 | Hide a section's edits | Working (text toggle; eye icon to come) |
 | Show original, Reset all | Working |
-| Definition, Sharpening, Noise reduction | Not started (need multi-pass shaders) |
+| Detail: Definition, Sharpening, Noise reduction | Working (see notes on halos and noise) |
+| Library: folder tree, thumbnail grid, filters, sort, thumbnail size, info panel | Working |
+| Ratings and flags | Working, in the Library and Develop (keys 0–5, P, X, U) |
+| Filmstrip in Develop | Working |
+| First launch: choose a folder (remembered) | Working |
 | Crop, straighten, rotate, flip | Stored in the edit; not applied yet |
-| Library, filmstrip, histogram, export, RAF | Not started |
+| Export, RAF | Not started |
 
 ## Running
 
 ```sh
-cargo run -p darkroom -- path/to/photo.jpg      # no path: a generated test chart
+cargo run -p darkroom                            # the folder chosen last time, or asks for one
+cargo run -p darkroom -- path/to/folder          # browse a folder (not remembered)
+cargo run -p darkroom -- path/to/photo.jpg       # open a photo in Develop
 cargo run -p darkroom -- --snap out.png --scene edited   # headless snapshot, no window
-# scenes: edited, curves, curve-red, extreme, warm, hidden
+# DARKROOM_NO_PREFS=1 ignores saved settings (root folder, thumbnail size), for tests
+# Develop scenes on the test chart: develop, edited, curves, curve-red, extreme, warm, hidden, definition, sharpen, denoise
+# (the detail scenes need a photo with texture and noise to show anything)
 # the panel scrolls; for the Curves section in a snapshot add --size 1280x1500
 # drive it: --script events.json (clicks and drags in window points)
 cargo test --workspace
@@ -56,7 +64,16 @@ The toolchain is pinned to Rust 1.99.1 (RUNE's), so rustup installs it on the fi
 
 ## Processing pipeline
 
-`crates/darkroom-render/src/develop.wgsl`, one compute pass per edit change, in the spec's order:
+Several compute passes per edit change, in the spec's order. All share `common.wgsl` (colour spaces, encoding, Oklab, output).
+
+| Pass | File | Does | When |
+| --- | --- | --- | --- |
+| Develop | `develop.wgsl` | Steps 1–6 below, source → stage (linear Rec.2020, unbounded) | Always |
+| Denoise | `denoise.wgsl` | Bilateral 9 × 9 blur on encoded RGB, stage → denoised stage | Noise reduction > 0 |
+| Pyramid | `pyramid.wgsl` | Encoded luminance at quarter size, Gaussian in two 1-D passes (σ ≈ 1% of the width) | Definition ≠ 0 |
+| Finish | `finish.wgsl` | Steps 7–9 below, → working texture | Always |
+
+Per pixel, in order:
 
 1. **Input:** the sRGB source is decoded to linear and converted to linear Rec.2020, the working space.
 2. **White balance:** per-channel multipliers, normalized so white keeps its luminance.
@@ -64,7 +81,10 @@ The toolchain is pinned to Rust 1.99.1 (RUNE's), so rustup installs it on the fi
 4. **Light:** black point per channel in linear light. Then Brilliance, Highlights, Shadows, Brightness and Contrast as one tone function on perceptually encoded luminance; the channels are scaled by the luminance ratio, so hue holds.
 5. **Color:** Saturation and Vibrance scale chroma in Oklab, at constant hue and lightness.
 6. **Curves:** composite then per-channel, on display (sRGB-primary) channels in perceptual encoding. Lookup tables come from `Curve::lut`.
-7. **Detail:** not yet.
+7. **Detail:**
+   - **Noise reduction:** in its own pass, before the others.
+   - **Sharpening:** an unsharp mask on luminance against a 5 × 5 binomial blur, ignoring differences under 0.01 so flat areas sharpen less.
+   - **Definition:** midtone-weighted local contrast. It compares the 5 × 5 blur, not the raw pixel, against the wide quarter-size blur, so it doesn't amplify pixel noise.
 8. **Vignette:** a radial multiplier.
 9. **Output:** convert to linear sRGB. In-range pixels are untouched, so an unedited photo comes out as it went in. Out-of-range pixels are handled in three steps:
    - **Brighter than white:** all three channels are scaled down by the brightest, keeping hue and saturation.
@@ -89,6 +109,22 @@ Two RUNE Metal-backend quirks this works around (worth reporting upstream):
 Edit files are `<photo name>.darkroom` (`DSCF4127.JPG.darkroom`, TOML inside), so a JPEG and RAF of the same shot keep separate edits. They're sparse: missing fields read as neutral. An edit with nothing in it removes its file.
 
 RUNE is pinned to a `dev` rev in the root `Cargo.toml`, with the four crates RUNE patches patched from the same rev. Bump all five together. `wgpu` is pinned to RUNE's version (`~30.0.1`) so our resources live on RUNE's device.
+
+## Library
+
+- **No catalog:** the library is a root folder, chosen on first launch and remembered in RUNE's `Prefs`.
+- **Background work:** folder scans, folder loads (EXIF and edit files), thumbnails and opening a photo all run on background threads (`crates/darkroom/src/jobs.rs`). They post messages and wake the window, and `poll` applies them.
+- **Thumbnails:** 448 px on the long edge, cached as JPEGs in `~/Library/Caches/darkroom/thumbs`. The cache is keyed by path, size and modification time, so a folder opens instantly the second time.
+- **Shortcuts:**
+
+  | Key | Does |
+  | --- | --- |
+  | 0–5 | Rate the photo |
+  | P / X / U | Pick / reject / unflag |
+  | ← → | Previous / next photo |
+  | Return | Open the selected photo in Develop |
+  | G or Esc | Back to the Library |
+  | D | Develop |
 
 ## Preview path (decided by the spike)
 
@@ -175,7 +211,16 @@ Design column: ✅ designed on the canvas · ◐ partly designed · ✗ not desi
 - [x] **Adjustment order:** as in "Processing pipeline"; curves run on display channels.
 - [x] **Sidecar name and format:** `DSCF1234.JPG.darkroom`, TOML inside (matches the Library screen's "a .darkroom file").
 - [x] **GPU readback:** see "Reading results back from the GPU".
-- [ ] **Gamut edge at extremes:** at about +1.5 EV with +100 saturation, pure synthetic blues show a hard edge between azure and blue. Real photos are unlikely to hit it; revisit the gamut mapping when export lands.
+- [ ] **Thumbnails show the original,** not the edit. Rendering edited thumbnails needs the develop pipeline on small images, ideally once per saved edit.
+- [ ] **Fuji film simulation in the info panel:** needs reading Fujifilm's MakerNote. Wants a real file to check the tag numbers against.
+- [ ] **Thumbnail speed on real 40 MP files:** untested here (the test library is 1800 px JPEGs). The first visit decodes every full image once; the cache makes later visits instant.
+- [ ] **Sparse edit files:** a rating alone writes the whole edit (every field at its default). Writing only non-default fields would keep the files readable.
+- [ ] **Library details still to build:** multi-select, Export from the Library, offline-original warnings, folder watching (new photos appear only after reopening the folder).
+- [ ] **Gamut edge in pure blues:** pure, fully saturated sRGB blues show a hard step once saturation or vibrance pushes them out of gamut. It's visible on the test chart's blue ramp even at +10 / +24, and as a hard azure-to-blue edge at extremes. Oklab's hue isn't constant around blue, which is a likely cause. Must be fixed before export; deep skies can get close.
+- [ ] **Definition halos:** Definition compares against a Gaussian blur, so strong values leave a light or dark rim along high-contrast edges (visible at 70 around a dark shape on sky). An edge-aware base (guided filter or bilateral pyramid) would remove it. The same base would serve local Brilliance, Highlights and Shadows.
+- [ ] **Sharpening on noisy photos:** sharpening still raises noise in flat areas (measured sd 7 → 11 at 80 on the noisy test image). A masking control, as Lightroom has, or pairing with noise reduction, would help.
+- [ ] **Detail at preview size:** the detail radii are in preview pixels (2560 px long edge). Export at full resolution must scale them, or sharpening and noise reduction will look weaker there.
+- [ ] **Detail timing:** not measured yet. Noise reduction is 81 taps per pixel and the most expensive pass; if dragging feels slow on a full preview, run detail at a lower resolution while the pointer is down.
 - [ ] **Picker hover readout:** the design shows the pixel's values next to the cursor while picking. Needs a probe on pointer move.
 - [x] **Working colour space and precision:** linear Rec.2020, f32 in the shader, `Rgba16Float` between passes.
 - [ ] **Thumbnail cache:** location and size.

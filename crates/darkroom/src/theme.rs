@@ -31,6 +31,7 @@ pub const ACCENT: Color = Color { r: 0.760525, g: 0.361307, b: 0.194618, a: 1.0 
 
 // Type styles. Sizes and weights from the design system; the spike draws them in RUNE's built-in
 // fonts until Rubik and DM Mono are bundled.
+pub const DISPLAY: TextStyle = TextStyle::new(22.0, 500.0);
 pub const TITLE: TextStyle = TextStyle::new(15.0, 500.0);
 pub const HEADING: TextStyle = TextStyle::new(13.0, 500.0);
 pub const BODY: TextStyle = TextStyle::new(13.0, 400.0);
@@ -54,3 +55,7 @@ pub const CHAN_LUMA: Color = Color { r: 0.623960, g: 0.577580, b: 0.508881, a: 1
 pub const ACCENT_SOFT: Color = Color { r: 0.045186, g: 0.024158, b: 0.014444, a: 1.0 };
 /// `accent-ink` #ecb38f
 pub const ACCENT_INK: Color = Color { r: 0.838799, g: 0.450786, b: 0.274677, a: 1.0 };
+/// `accent-hover` #ebb490
+pub const ACCENT_HOVER: Color = Color { r: 0.830770, g: 0.456411, b: 0.278894, a: 1.0 };
+/// `on-accent` #24170e
+pub const ON_ACCENT: Color = Color { r: 0.017642, g: 0.008568, b: 0.004391, a: 1.0 };

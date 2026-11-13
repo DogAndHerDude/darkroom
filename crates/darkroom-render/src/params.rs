@@ -26,6 +26,9 @@ pub struct Params {
     pub color: [f32; 4],
     /// Vignette (0..1), curves on (0 or 1), and the pixel the probe reads (x, y).
     pub effects: [f32; 4],
+    /// Definition (−1..1), sharpening and noise reduction (0..1), and the definition blur's σ in
+    /// quarter-size pixels (set per photo by `Develop`).
+    pub detail: [f32; 4],
 }
 
 impl Params {
@@ -43,9 +46,14 @@ impl Params {
         } else {
             ([1.0, 1.0, 1.0, 0.0], [0.0; 4])
         };
-        let vignette = if d.enabled { (d.vignette / 100.0).clamp(0.0, 1.0) } else { 0.0 };
+        let unit = |v: f32| (v / 100.0).clamp(0.0, 1.0);
+        let (vignette, detail) = if d.enabled {
+            (unit(d.vignette), [n(d.definition), unit(d.sharpening), unit(d.noise_reduction), 0.0])
+        } else {
+            (0.0, [0.0; 4])
+        };
         let curves = if e.curves.enabled && !e.curves.is_identity() { 1.0 } else { 0.0 };
-        Params { white_balance, light, tone, color, effects: [vignette, curves, 0.0, 0.0] }
+        Params { white_balance, light, tone, color, effects: [vignette, curves, 0.0, 0.0], detail }
     }
 }
 
@@ -75,6 +83,19 @@ mod tests {
         assert_eq!(p.tone, [0.0; 4]);
         assert_eq!(p.color, [0.0; 4]);
         assert_eq!(p.effects, [0.0; 4], "identity curves skip the curves step");
+        assert_eq!(p.detail, [0.0; 4], "no detail passes");
+    }
+
+    #[test]
+    fn detail_reaches_the_shader_in_shader_units_and_hides_with_its_section() {
+        let mut e = Edit::default();
+        e.detail.definition = -40.0;
+        e.detail.sharpening = 50.0;
+        e.detail.noise_reduction = 120.0;
+        let p = Params::from_edit(&e);
+        assert_eq!(&p.detail[..3], &[-0.4, 0.5, 1.0], "noise reduction clamps at 100");
+        e.detail.enabled = false;
+        assert_eq!(Params::from_edit(&e).detail, [0.0; 4]);
     }
 
     #[test]

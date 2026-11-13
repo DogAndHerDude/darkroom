@@ -10,11 +10,13 @@ version = "0.0.1"
 [workspace.dependencies]
 # RUNE is pre-release: pin a `dev` rev, and patch the same crates RUNE patches, from the same rev
 # (a dependency's [patch] doesn't reach this workspace). Bump all five together.
-rune = { git = "https://github.com/anomalyco/rune", rev = "740ecbc96902fe0008745de61cd3b732fb407a6b" }
+rune = { git = "https://github.com/anomalyco/rune", rev = "740ecbc96902fe0008745de61cd3b732fb407a6b", features = ["native-file-dialog"] }
 # Must stay on RUNE's wgpu so our textures and pipelines live on the device RUNE hands us.
 wgpu = { version = "~30.0.1", default-features = false, features = ["std", "wgsl"] }
 bytemuck = { version = "1", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+kamadak-exif = "0.6"
+blake3 = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 darkroom-core = { path = "crates/darkroom-core" }

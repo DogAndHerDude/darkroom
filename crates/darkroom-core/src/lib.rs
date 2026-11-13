@@ -6,6 +6,8 @@
 
 pub mod curve;
 pub mod edit;
+pub mod exif;
+pub mod library;
 pub mod sidecar;
 
 pub use curve::Curve;

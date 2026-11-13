@@ -79,10 +79,26 @@ struct PresentUniform {
 
 const WORKING_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
+/// The colour maths every develop pass shares; each pass's source is this plus its own.
+const COMMON: &str = include_str!("common.wgsl");
+
 struct Photo {
     id: u64,
     size: [u32; 2],
+    /// The definition blur's size: a quarter of the photo's, rounded up.
+    quarter: [u32; 2],
+    /// Source → stage (steps 1–5).
     develop_group: wgpu::BindGroup,
+    /// Stage → denoised stage.
+    denoise_group: wgpu::BindGroup,
+    /// Stage (or denoised stage) → quarter A, then A → B → A for the two blur directions.
+    downsample_group: wgpu::BindGroup,
+    downsample_denoised_group: wgpu::BindGroup,
+    blur_h_group: wgpu::BindGroup,
+    blur_v_group: wgpu::BindGroup,
+    /// Stage (or denoised stage) and the blur → working texture.
+    finish_group: wgpu::BindGroup,
+    finish_denoised_group: wgpu::BindGroup,
     histogram_group: wgpu::BindGroup,
     present_group: wgpu::BindGroup,
 }
@@ -91,6 +107,14 @@ pub struct Develop {
     develop_layout: wgpu::BindGroupLayout,
     develop_pipeline: wgpu::ComputePipeline,
     probe_pipeline: wgpu::ComputePipeline,
+    denoise_layout: wgpu::BindGroupLayout,
+    denoise_pipeline: wgpu::ComputePipeline,
+    pyramid_layout: wgpu::BindGroupLayout,
+    downsample_pipeline: wgpu::ComputePipeline,
+    blur_h_pipeline: wgpu::ComputePipeline,
+    blur_v_pipeline: wgpu::ComputePipeline,
+    finish_layout: wgpu::BindGroupLayout,
+    finish_pipeline: wgpu::ComputePipeline,
     histogram_layout: wgpu::BindGroupLayout,
     histogram_pipeline: wgpu::ComputePipeline,
     params: wgpu::Buffer,
@@ -129,6 +153,7 @@ impl Develop {
             multisampled: false,
         };
         let compute = |label, layout: &wgpu::BindGroupLayout, source: &str, entry_point| {
+            let source = format!("{COMMON}\n{source}");
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(label), source: wgpu::ShaderSource::Wgsl(source.into()) });
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(label),
@@ -145,28 +170,63 @@ impl Develop {
         };
 
         let cs = wgpu::ShaderStages::COMPUTE;
+        let write = wgpu::BindingType::StorageTexture {
+            access: wgpu::StorageTextureAccess::WriteOnly,
+            format: WORKING_FORMAT,
+            view_dimension: wgpu::TextureViewDimension::D2,
+        };
         let develop_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("develop"),
-            entries: &[
-                entry(0, cs, texture(false)),
-                entry(1, cs, wgpu::BindingType::StorageTexture {
-                    access: wgpu::StorageTextureAccess::WriteOnly,
-                    format: WORKING_FORMAT,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                }),
-                entry(2, cs, uniform),
-                entry(3, cs, storage(true)),
-                entry(4, cs, storage(false)),
-            ],
+            entries: &[entry(0, cs, texture(false)), entry(1, cs, write), entry(2, cs, uniform), entry(3, cs, storage(true)), entry(4, cs, storage(false))],
         });
         let develop_pipeline = compute("develop", &develop_layout, include_str!("develop.wgsl"), "main");
         let probe_pipeline = compute("probe", &develop_layout, include_str!("develop.wgsl"), "probe");
+
+        // Noise reduction and the definition blur share a shape: read one texture, write another.
+        let read_write_layout = |label| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some(label),
+                entries: &[entry(0, cs, texture(false)), entry(1, cs, write), entry(2, cs, uniform)],
+            })
+        };
+        let denoise_layout = read_write_layout("denoise");
+        let denoise_pipeline = compute("denoise", &denoise_layout, include_str!("denoise.wgsl"), "main");
+        let pyramid_layout = read_write_layout("pyramid");
+        let downsample_pipeline = compute("downsample", &pyramid_layout, include_str!("pyramid.wgsl"), "downsample");
+        let blur_h_pipeline = compute("blur h", &pyramid_layout, include_str!("pyramid.wgsl"), "blur_h");
+        let blur_v_pipeline = compute("blur v", &pyramid_layout, include_str!("pyramid.wgsl"), "blur_v");
+
+        let finish_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("finish"),
+            entries: &[
+                entry(0, cs, texture(false)),
+                entry(1, cs, texture(true)),
+                entry(2, cs, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)),
+                entry(3, cs, write),
+                entry(4, cs, uniform),
+            ],
+        });
+        let finish_pipeline = compute("finish", &finish_layout, include_str!("finish.wgsl"), "main");
 
         let histogram_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("histogram"),
             entries: &[entry(0, cs, texture(false)), entry(1, cs, storage(false))],
         });
-        let histogram_pipeline = compute("histogram", &histogram_layout, include_str!("histogram.wgsl"), "main");
+        let histogram_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("histogram"),
+            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("histogram"),
+                bind_group_layouts: &[Some(&histogram_layout)],
+                immediate_size: 0,
+            })),
+            module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("histogram"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("histogram.wgsl").into()),
+            }),
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
         let vf = wgpu::ShaderStages::VERTEX_FRAGMENT;
         let present_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -201,6 +261,14 @@ impl Develop {
             develop_layout,
             develop_pipeline,
             probe_pipeline,
+            denoise_layout,
+            denoise_pipeline,
+            pyramid_layout,
+            downsample_pipeline,
+            blur_h_pipeline,
+            blur_v_pipeline,
+            finish_layout,
+            finish_pipeline,
             histogram_layout,
             histogram_pipeline,
             params: buffer("develop params", size_of::<Params>() as u64, uniform_usage),
@@ -233,11 +301,12 @@ impl Develop {
     /// Uploads a photo (tightly packed sRGB RGBA8) and makes its working texture.
     pub fn set_photo(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, id: u64, size: [u32; 2], rgba: &[u8]) {
         assert_eq!(rgba.len(), (size[0] * size[1] * 4) as usize, "rgba is width × height × 4 bytes");
-        let extent = wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 };
-        let texture = |label, format, usage| {
+        let quarter = [size[0].div_ceil(4), size[1].div_ceil(4)];
+        let extent = |[width, height]: [u32; 2]| wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
+        let texture = |label, at: [u32; 2], format, usage| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
-                size: extent,
+                size: extent(at),
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -246,28 +315,40 @@ impl Develop {
                 view_formats: &[],
             })
         };
-        let source = texture("photo source", wgpu::TextureFormat::Rgba8UnormSrgb, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
+        let source = texture("photo source", size, wgpu::TextureFormat::Rgba8UnormSrgb, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
         queue.write_texture(
             source.as_image_copy(),
             rgba,
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(size[0] * 4), rows_per_image: Some(size[1]) },
-            extent,
+            extent(size),
         );
-        let working = texture("photo working", WORKING_FORMAT, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING);
+        let float = |label, at| texture(label, at, WORKING_FORMAT, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING).create_view(&Default::default());
         let source_view = source.create_view(&Default::default());
-        let working_view = working.create_view(&Default::default());
+        let stage_view = float("photo stage", size);
+        let denoised_view = float("photo denoised", size);
+        let quarter_a = float("definition blur a", quarter);
+        let quarter_b = float("definition blur b", quarter);
+        let working_view = float("photo working", size);
 
-        let develop_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("develop"),
-            layout: &self.develop_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&source_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&working_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: self.params.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: self.curves.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: self.probed.as_entire_binding() },
-            ],
-        });
+        let view = |v| wgpu::BindingResource::TextureView(v);
+        let group = |label, layout, entries: &[wgpu::BindingResource<'_>]| {
+            let entries: Vec<_> = entries.iter().enumerate().map(|(i, r)| wgpu::BindGroupEntry { binding: i as u32, resource: r.clone() }).collect();
+            device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some(label), layout, entries: &entries })
+        };
+        let params = self.params.as_entire_binding();
+        let develop_group = group(
+            "develop",
+            &self.develop_layout,
+            &[view(&source_view), view(&stage_view), params.clone(), self.curves.as_entire_binding(), self.probed.as_entire_binding()],
+        );
+        let denoise_group = group("denoise", &self.denoise_layout, &[view(&stage_view), view(&denoised_view), params.clone()]);
+        let downsample_group = group("downsample", &self.pyramid_layout, &[view(&stage_view), view(&quarter_a), params.clone()]);
+        let downsample_denoised_group = group("downsample", &self.pyramid_layout, &[view(&denoised_view), view(&quarter_a), params.clone()]);
+        let blur_h_group = group("blur h", &self.pyramid_layout, &[view(&quarter_a), view(&quarter_b), params.clone()]);
+        let blur_v_group = group("blur v", &self.pyramid_layout, &[view(&quarter_b), view(&quarter_a), params.clone()]);
+        let sampler = wgpu::BindingResource::Sampler(&self.sampler);
+        let finish_group = group("finish", &self.finish_layout, &[view(&stage_view), view(&quarter_a), sampler.clone(), view(&working_view), params.clone()]);
+        let finish_denoised_group = group("finish", &self.finish_layout, &[view(&denoised_view), view(&quarter_a), sampler, view(&working_view), params]);
         let histogram_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("histogram"),
             layout: &self.histogram_layout,
@@ -285,7 +366,21 @@ impl Develop {
                 wgpu::BindGroupEntry { binding: 2, resource: self.present_uniform.as_entire_binding() },
             ],
         });
-        self.photo = Some(Photo { id, size, develop_group, histogram_group, present_group });
+        self.photo = Some(Photo {
+            id,
+            size,
+            quarter,
+            develop_group,
+            denoise_group,
+            downsample_group,
+            downsample_denoised_group,
+            blur_h_group,
+            blur_v_group,
+            finish_group,
+            finish_denoised_group,
+            histogram_group,
+            present_group,
+        });
         self.developed = None;
     }
 
@@ -319,21 +414,35 @@ impl Develop {
             params.effects[2] = x as f32;
             params.effects[3] = y as f32;
         }
+        params.detail[3] = definition_sigma(photo.quarter);
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
+        let [definition, _, noise, _] = params.detail;
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("develop") });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("develop"), timestamp_writes: None });
-            if develop {
-                pass.set_pipeline(&self.develop_pipeline);
-                pass.set_bind_group(0, &photo.develop_group, &[]);
-                pass.dispatch_workgroups(photo.size[0].div_ceil(8), photo.size[1].div_ceil(8), 1);
+        // One compute pass per step, so each reads what the one before it finished writing.
+        let mut run = |label, pipeline: &wgpu::ComputePipeline, group: &wgpu::BindGroup, [w, h]: [u32; 2], per_group: u32| {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(label), timestamp_writes: None });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, group, &[]);
+            pass.dispatch_workgroups(w.div_ceil(per_group), h.div_ceil(per_group), 1);
+        };
+        if develop {
+            run("develop", &self.develop_pipeline, &photo.develop_group, photo.size, 8);
+            let denoised = noise > 0.0;
+            if denoised {
+                run("denoise", &self.denoise_pipeline, &photo.denoise_group, photo.size, 8);
             }
-            if probe.is_some() {
-                pass.set_pipeline(&self.probe_pipeline);
-                pass.set_bind_group(0, &photo.develop_group, &[]);
-                pass.dispatch_workgroups(1, 1, 1);
+            if definition != 0.0 {
+                let down = if denoised { &photo.downsample_denoised_group } else { &photo.downsample_group };
+                run("downsample", &self.downsample_pipeline, down, photo.quarter, 8);
+                run("blur h", &self.blur_h_pipeline, &photo.blur_h_group, photo.quarter, 8);
+                run("blur v", &self.blur_v_pipeline, &photo.blur_v_group, photo.quarter, 8);
             }
+            let finish = if denoised { &photo.finish_denoised_group } else { &photo.finish_group };
+            run("finish", &self.finish_pipeline, finish, photo.size, 8);
+        }
+        if probe.is_some() {
+            run("probe", &self.probe_pipeline, &photo.develop_group, [1, 1], 1);
         }
         if histogram {
             encoder.clear_buffer(&self.bins, 0, None);
@@ -432,6 +541,12 @@ impl Develop {
         pass.set_bind_group(0, &photo.present_group, &[]);
         pass.draw(0..4, 0..1);
     }
+}
+
+/// The definition blur's σ in quarter-size pixels: about 1% of the photo's width, so Definition
+/// looks the same at any preview size.
+pub fn definition_sigma(quarter: [u32; 2]) -> f32 {
+    (quarter[0].max(quarter[1]) as f32 / 120.0).clamp(1.5, 10.0)
 }
 
 /// `DARKROOM_DEBUG=1` prints what readbacks return.

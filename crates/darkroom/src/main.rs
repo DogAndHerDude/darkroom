@@ -1,37 +1,74 @@
-//! Darkroom: a RUNE window around one photo, developed on RUNE's own GPU device, with the v1
-//! Light, Color and vignette adjustments. Edits load from and save to the photo's edit file.
+//! Darkroom: a photo editor in a RUNE window. The Library browses a folder of photos; Develop
+//! edits one, on RUNE's own GPU device. Edits load from and save to each photo's edit file.
 //!
-//! `cargo run -p darkroom -- path/to/photo.jpg` (no path: a generated test chart, not saved).
+//! `cargo run -p darkroom` opens the folder chosen last time (or asks for one).
+//! `cargo run -p darkroom -- path/to/folder` browses that folder; `-- path/to/photo.jpg` opens a
+//! photo in Develop. `DARKROOM_NO_PREFS=1` ignores and keeps no saved settings (for tests).
 
 mod curves;
+mod develop;
+mod jobs;
+mod library;
 mod photo;
 mod theme;
+mod ui;
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use darkroom_core::{Channel, Curve, Edit, sidecar};
+use darkroom_core::library::{Entry, Filter, Folder, Sort};
+use darkroom_core::{Channel, Curve, Edit, Flag, sidecar};
 use darkroom_render::{Develop, Histogram, Placement, Results};
 use rune::compose::DeviceKey;
-use rune::{AppSpec, Compositor, Cursor, Cx, Drag, El, Frame, Phase, ScrollSpec, Tx, Waker, col, effect, el, row, spacer, text};
+use rune::prefs::Prefs;
+use rune::{AppSpec, Compositor, Cx, El, Frame, Image, ImageCache, Key, KeyEvent, Tx, Waker};
 
 use crate::curves::Picker;
-
+use crate::jobs::{Jobs, Msg};
 use crate::photo::Photo;
-use crate::theme as t;
 
 /// The effect slot the photo is drawn into.
 const PHOTO_SLOT: u32 = 1;
-/// Slider track width: the 300 pt panel less its 12 pt padding on each side.
-const TRACK: f32 = 276.0;
+const SIDEBAR_WIDTH: f32 = 240.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Module {
+    Library,
+    Develop,
+}
 
 struct State {
+    module: Module,
+    prefs: Prefs,
+    jobs: Jobs,
+    /// Thumbnails become images here; made in `setup`, which has the waker.
+    images: Option<ImageCache>,
+
+    // Library.
+    /// The chosen folder and the folders under it that hold photos.
+    root: Option<PathBuf>,
+    tree: Option<Folder>,
+    /// The folder the grid and filmstrip show.
+    folder: Option<PathBuf>,
+    folder_generation: u64,
+    loading_folder: bool,
+    entries: Vec<Entry>,
+    thumbs: HashMap<PathBuf, Image>,
+    filter: Filter,
+    sort: Sort,
+    thumb_size: f32,
+    selected: Option<PathBuf>,
+
+    // Develop.
     photo: Arc<Photo>,
-    /// Where the photo came from; None for the test chart, which is never saved.
+    /// Where the open photo came from; None for the test chart, which is never saved.
     path: Option<PathBuf>,
+    /// A photo being opened in the background.
+    opening: Option<PathBuf>,
     edit: Edit,
     show_original: bool,
-    /// The last save's outcome, shown under the file name.
+    /// The last save's or open's outcome, shown in the panel.
     status: String,
     /// The curve the Curves section shows.
     curve_channel: Channel,
@@ -60,47 +97,213 @@ impl State {
         if self.show_original { self.edit.without_adjustments() } else { self.edit.clone() }
     }
 
-    /// Saves the edit beside the photo.
+    /// Saves the open photo's edit beside it.
     fn save(&mut self) {
-        let Some(path) = &self.path else { return };
-        self.status = match sidecar::save(path, &self.edit) {
+        let Some(path) = self.path.clone() else { return };
+        self.status = match sidecar::save(&path, &self.edit) {
             Ok(()) if self.edit.has_adjustments() => "Edited · saved".into(),
             Ok(()) => "Not edited".into(),
             Err(e) => format!("Couldn't save: {e}"),
         };
+        let (rating, flag, edited) = (self.edit.rating, self.edit.flag, self.edit.has_adjustments());
+        if let Some(e) = self.entries.iter_mut().find(|e| e.path == path) {
+            (e.rating, e.flag, e.edited) = (rating, flag, edited);
+        }
+    }
+
+    /// Indices into `entries` the grid and filmstrip show, in order.
+    fn visible(&self) -> Vec<usize> {
+        darkroom_core::library::visible(&self.entries, self.filter, self.sort)
+    }
+
+    fn entry(&self, path: &Path) -> Option<&Entry> {
+        self.entries.iter().find(|e| e.path == path)
+    }
+
+    fn selected_entry(&self) -> Option<&Entry> {
+        self.selected.as_deref().and_then(|p| self.entry(p))
+    }
+
+    fn switch_to(&mut self, module: Module) {
+        if module == Module::Develop
+            && self.path.is_none()
+            && let Some(p) = self.selected.clone()
+        {
+            self.open(p);
+        }
+        self.module = module;
+    }
+
+    /// Uses `root` as the library, scanning its folders. `remember` keeps it for next time.
+    fn set_root(&mut self, root: PathBuf, remember: bool) {
+        if remember {
+            let _ = self.prefs.set("root", &root);
+        }
+        self.jobs.scan(root.clone());
+        let last = self.prefs.get::<PathBuf>("folder").filter(|f| f.starts_with(&root) && f.is_dir());
+        self.root = Some(root.clone());
+        self.open_folder(last.unwrap_or(root));
+    }
+
+    /// Shows `folder`'s photos, loading them in the background.
+    fn open_folder(&mut self, folder: PathBuf) {
+        if self.root.is_some() {
+            let _ = self.prefs.set("folder", &folder);
+        }
+        self.folder_generation = self.jobs.load_folder(folder.clone());
+        self.folder = Some(folder);
+        self.entries.clear();
+        self.loading_folder = true;
+        self.selected = None;
+    }
+
+    /// Opens a photo in Develop (in the background; the current one stays until it's ready).
+    fn open(&mut self, path: PathBuf) {
+        self.selected = Some(path.clone());
+        if self.path.as_ref() == Some(&path) || self.opening.as_ref() == Some(&path) {
+            return;
+        }
+        self.opening = Some(path.clone());
+        self.jobs.open(path);
+    }
+
+    /// Sets a photo's rating (0–5), in its edit file and the library.
+    fn set_rating(&mut self, path: &Path, rating: u8) {
+        self.change(path, |e| e.rating = rating.min(5));
+    }
+
+    fn set_flag(&mut self, path: &Path, flag: Flag) {
+        self.change(path, |e| e.flag = flag);
+    }
+
+    /// Changes a photo's edit: the open one's directly, any other through its edit file.
+    fn change(&mut self, path: &Path, f: impl FnOnce(&mut Edit)) {
+        if self.path.as_deref() == Some(path) {
+            f(&mut self.edit);
+            self.save();
+            return;
+        }
+        match sidecar::load(path) {
+            Ok(mut edit) => {
+                f(&mut edit);
+                if let Err(e) = sidecar::save(path, &edit) {
+                    self.status = format!("Couldn't save: {e}");
+                }
+                if let Some(e) = self.entries.iter_mut().find(|e| e.path == path) {
+                    (e.rating, e.flag) = (edit.rating, edit.flag);
+                }
+            }
+            Err(e) => self.status = format!("Couldn't read the edit file: {e}"),
+        }
+    }
+
+    /// The photo keyboard shortcuts act on: the open one in Develop, the selected one in the
+    /// Library.
+    fn target(&self) -> Option<PathBuf> {
+        match self.module {
+            Module::Develop => self.path.clone(),
+            Module::Library => self.selected.clone(),
+        }
+    }
+
+    /// Moves to the next (`+1`) or previous (`-1`) photo in the grid's order.
+    fn step(&mut self, by: isize) {
+        let visible = self.visible();
+        if visible.is_empty() {
+            return;
+        }
+        let at = self.target().and_then(|p| visible.iter().position(|&i| self.entries[i].path == p));
+        let next = at.map_or(0, |i| (i as isize + by).clamp(0, visible.len() as isize - 1) as usize);
+        let path = self.entries[visible[next]].path.clone();
+        match self.module {
+            Module::Library => self.selected = Some(path),
+            Module::Develop => self.open(path),
+        }
+    }
+
+    fn handle(&mut self, msg: Msg) {
+        match msg {
+            Msg::Tree(tree) => {
+                // A root with no photos of its own opens its first folder that has some.
+                if self.folder.as_ref() == Some(&tree.path)
+                    && tree.photos == 0
+                    && let Some((_, first)) = tree.flatten().into_iter().find(|(_, f)| f.photos > 0)
+                {
+                    let first = first.path.clone();
+                    self.open_folder(first);
+                }
+                self.tree = Some(tree);
+            }
+            Msg::Folder { generation, folder, entries } => {
+                if generation != self.folder_generation || self.folder.as_ref() != Some(&folder) {
+                    return;
+                }
+                self.entries = entries;
+                self.loading_folder = false;
+                let visible = self.visible();
+                if self.selected.is_none() {
+                    self.selected = visible.first().map(|&i| self.entries[i].path.clone());
+                }
+                let wanted: Vec<PathBuf> = visible.iter().map(|&i| self.entries[i].path.clone()).filter(|p| !self.thumbs.contains_key(p)).collect();
+                self.jobs.thumbnails(wanted);
+            }
+            Msg::Thumb { path, width, height, rgba } => {
+                if let Some(images) = &self.images {
+                    self.thumbs.insert(path, images.rgba(width, height, rgba));
+                }
+            }
+            Msg::Opened { path, result } => {
+                if self.opening.as_ref() != Some(&path) {
+                    return;
+                }
+                self.opening = None;
+                match result {
+                    Ok(opened) => {
+                        let (photo, edit) = *opened;
+                        self.histogram = photo.histogram;
+                        self.photo = Arc::new(photo);
+                        self.status = if edit.has_adjustments() { "Edited".into() } else { "Not edited".into() };
+                        self.edit = edit;
+                        self.path = Some(path);
+                        self.show_original = false;
+                        (self.curve_point, self.curve_removing, self.picker, self.probe_for) = (None, false, None, None);
+                    }
+                    Err(e) => {
+                        let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                        self.status = format!("Couldn't open {name}: {e}");
+                    }
+                }
+            }
+        }
     }
 }
 
 fn init() -> State {
-    let arg = rune::tooling::extra_args().first().cloned();
-    let (photo, path) = match &arg {
-        Some(p) => match Photo::open(p) {
-            Ok(photo) => (photo, Some(PathBuf::from(p))),
-            Err(e) => {
-                eprintln!("couldn't open {p}: {e}; showing the test chart");
-                (Photo::test_chart(), None)
-            }
-        },
-        None => (Photo::test_chart(), None),
-    };
-    let (edit, status) = match &path {
-        Some(p) => match sidecar::load(p) {
-            Ok(e) => {
-                let status = if e.has_adjustments() { "Edited" } else { "Not edited" };
-                (e, status.to_owned())
-            }
-            // A broken edit file is left alone; editing would overwrite it, so say so.
-            Err(e) => (Edit::default(), format!("Edit file unreadable, starting fresh: {e}")),
-        },
-        None => (Edit::default(), "Test chart · edits aren't saved".to_owned()),
-    };
-    let histogram = photo.histogram;
-    State {
+    let prefs = if std::env::var_os("DARKROOM_NO_PREFS").is_some() { Prefs::memory() } else { Prefs::open("app.darkroom") };
+    let photo = Photo::test_chart();
+    let mut s = State {
+        module: Module::Library,
+        prefs,
+        jobs: Jobs::new(),
+        images: None,
+        root: None,
+        tree: None,
+        folder: None,
+        folder_generation: 0,
+        loading_folder: false,
+        entries: Vec::new(),
+        thumbs: HashMap::new(),
+        filter: Filter::default(),
+        sort: Sort::default(),
+        thumb_size: 168.0,
+        selected: None,
+        histogram: photo.histogram,
         photo: Arc::new(photo),
-        path,
-        edit,
+        path: None,
+        opening: None,
+        edit: Edit::default(),
         show_original: false,
-        status,
+        status: String::new(),
         curve_channel: Channel::Rgb,
         curve_point: None,
         curve_removing: false,
@@ -108,15 +311,57 @@ fn init() -> State {
         probe_request: None,
         probe_for: None,
         next_probe: 1,
-        histogram,
         results: Arc::new(Results::default()),
         waker: None,
+    };
+    s.thumb_size = s.prefs.get("thumb_size").unwrap_or(s.thumb_size).clamp(library::THUMB_MIN, library::THUMB_MAX);
+
+    match rune::tooling::extra_args().first().map(PathBuf::from) {
+        Some(dir) if dir.is_dir() => s.set_root(dir, false),
+        Some(file) => {
+            // A photo: open it at once (headless snapshots need it on the first frame) and
+            // browse its folder.
+            if let Some(folder) = file.parent().filter(|p| !p.as_os_str().is_empty()) {
+                s.root = Some(folder.to_owned());
+                s.jobs.scan(folder.to_owned());
+                s.open_folder(folder.to_owned());
+            }
+            match Photo::open(&file.to_string_lossy()) {
+                Ok(photo) => {
+                    s.histogram = photo.histogram;
+                    s.photo = Arc::new(photo);
+                    s.edit = sidecar::load(&file).unwrap_or_default();
+                    s.status = if s.edit.has_adjustments() { "Edited".into() } else { "Not edited".into() };
+                    s.selected = Some(file.clone());
+                    s.path = Some(file);
+                    s.module = Module::Develop;
+                }
+                Err(e) => s.status = format!("Couldn't open {}: {e}", file.display()),
+            }
+        }
+        None => {
+            if let Some(root) = s.prefs.get::<PathBuf>("root").filter(|r| r.is_dir()) {
+                s.set_root(root, false);
+            }
+        }
     }
+    s
 }
 
-/// Picks up what the GPU sent back since the last frame. True when the view must rebuild.
+fn setup(s: &mut State, waker: Waker) {
+    s.images = Some(ImageCache::new(waker.clone()));
+    s.jobs.set_waker(waker.clone());
+    s.waker = Some(waker);
+}
+
+/// Picks up what background jobs and the GPU sent back since the last frame. True when the
+/// view must rebuild.
 fn poll(s: &mut State, _t: f64, _tx: &mut Tx) -> bool {
     let mut changed = false;
+    for msg in s.jobs.take() {
+        s.handle(msg);
+        changed = true;
+    }
     if let Some(h) = s.results.take_histogram() {
         s.histogram = h;
         changed = true;
@@ -134,247 +379,44 @@ fn poll(s: &mut State, _t: f64, _tx: &mut Tx) -> bool {
     changed
 }
 
-/// A click on the photo while a picker is active: probe the pixel under it.
-fn pick(s: &mut State, g: &Drag) {
-    let Some(picker) = s.picker else { return };
-    let size = s.photo.size;
-    let [fx, fy, fw, fh] = darkroom_render::fit([0.0, 0.0, g.w, g.h], size);
-    let (u, v) = ((g.x - fx) / fw, (g.y - fy) / fh);
-    if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
-        return;
+/// Keyboard shortcuts, as in Lightroom: 0–5 rate, P pick, X reject, U unflag, ← → move between
+/// photos, Return opens the selected photo in Develop, G or Esc goes back to the Library.
+fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
+    if ev.mods.cmd || ev.mods.ctrl || ev.mods.alt {
+        return false;
     }
-    let pixel = [(u * size[0] as f32) as u32, (v * size[1] as f32) as u32];
-    let id = s.next_probe;
-    s.next_probe += 1;
-    s.probe_request = Some((id, pixel));
-    s.probe_for = Some((id, picker));
-    s.picker = None;
+    match &ev.key {
+        Key::Left => s.step(-1),
+        Key::Right => s.step(1),
+        Key::Enter if s.module == Module::Library => s.switch_to(Module::Develop),
+        Key::Escape if s.module == Module::Develop => s.module = Module::Library,
+        Key::Text(t) => {
+            let target = s.target();
+            match (t.to_lowercase().as_str(), target) {
+                (d @ ("0" | "1" | "2" | "3" | "4" | "5"), Some(p)) => s.set_rating(&p, d.parse().unwrap_or(0)),
+                ("p", Some(p)) => s.set_flag(&p, Flag::Pick),
+                ("x", Some(p)) => s.set_flag(&p, Flag::Reject),
+                ("u", Some(p)) => s.set_flag(&p, Flag::None),
+                ("g", _) => s.module = Module::Library,
+                ("d", _) => s.switch_to(Module::Develop),
+                _ => return false,
+            }
+        }
+        _ => return false,
+    }
+    true
 }
-
-// ---- adjustments ------------------------------------------------------------------------------
-
-#[derive(Clone, Copy)]
-enum Readout {
-    /// +0.35
-    Stops,
-    /// −18, +12
-    Whole,
-}
-
-/// One slider: its range, how its value reads, and where it lives in the edit.
-#[derive(Clone, Copy)]
-struct Adjustment {
-    key: &'static str,
-    label: &'static str,
-    min: f32,
-    max: f32,
-    readout: Readout,
-    get: fn(&Edit) -> f32,
-    set: fn(&mut Edit, f32),
-}
-
-const fn adj(key: &'static str, label: &'static str, get: fn(&Edit) -> f32, set: fn(&mut Edit, f32)) -> Adjustment {
-    Adjustment { key, label, min: -100.0, max: 100.0, readout: Readout::Whole, get, set }
-}
-
-const LIGHT: [Adjustment; 7] = [
-    Adjustment { min: -3.0, max: 3.0, readout: Readout::Stops, ..adj("exposure", "Exposure", |e| e.light.exposure, |e, v| e.light.exposure = v) },
-    adj("brilliance", "Brilliance", |e| e.light.brilliance, |e, v| e.light.brilliance = v),
-    adj("highlights", "Highlights", |e| e.light.highlights, |e, v| e.light.highlights = v),
-    adj("shadows", "Shadows", |e| e.light.shadows, |e, v| e.light.shadows = v),
-    adj("brightness", "Brightness", |e| e.light.brightness, |e, v| e.light.brightness = v),
-    adj("contrast", "Contrast", |e| e.light.contrast, |e, v| e.light.contrast = v),
-    adj("black-point", "Black point", |e| e.light.black_point, |e, v| e.light.black_point = v),
-];
-
-const COLOR: [Adjustment; 4] = [
-    adj("saturation", "Saturation", |e| e.color.saturation, |e, v| e.color.saturation = v),
-    adj("vibrance", "Vibrance", |e| e.color.vibrance, |e, v| e.color.vibrance = v),
-    adj("temperature", "Temperature", |e| e.color.temperature, |e, v| e.color.temperature = v),
-    adj("tint", "Tint", |e| e.color.tint, |e, v| e.color.tint = v),
-];
-
-const DETAIL: [Adjustment; 1] = [Adjustment { min: 0.0, ..adj("vignette", "Vignette", |e| e.detail.vignette, |e, v| e.detail.vignette = v) }];
-
-// ---- view ---------------------------------------------------------------------------------------
 
 fn view(s: &State, _: &mut Cx<State>) -> El {
-    let mut photo = effect(PHOTO_SLOT).key("photo").w_full().grow(1.0);
-    if s.picker.is_some() {
-        photo = photo.cursor(Cursor::Crosshair).on_drag(|s: &mut State, g: &mut Drag, _tx: &mut Tx| {
-            if g.phase == Phase::Down {
-                pick(s, g);
-            }
-        });
+    match s.module {
+        Module::Library => library::view(s),
+        Module::Develop => develop::view(s),
     }
-    let hint = s.picker.map(|p| {
-        text(format!("Click something that should be {}. Click the picker again to cancel.", curves::target(p)))
-            .font(t::LABEL)
-            .color(t::INK_MUTED)
-    });
-    let stage = col().grow(1.0).shrink().min_w(0.0).h_full().padding(24.0).gap(8.0).items_center().children(hint).child(photo);
-
-    let e = &s.edit;
-    let sections = col()
-        .key("sections")
-        .w_full()
-        .grow(1.0)
-        .min_h(0.0)
-        .scroll(ScrollSpec { stick_bottom: false })
-        .child(section("light", "Light", e.light.enabled, |e| e.light.enabled = !e.light.enabled, sliders(&LIGHT, e)))
-        .child(section("color", "Color", e.color.enabled, |e| e.color.enabled = !e.color.enabled, sliders(&COLOR, e)))
-        .child(section("curves", "Curves", e.curves.enabled, |e| e.curves.enabled = !e.curves.enabled, curves::body(s)))
-        .child(section("detail", "Detail", e.detail.enabled, |e| e.detail.enabled = !e.detail.enabled, sliders(&DETAIL, e)));
-
-    let header = col()
-        .w_full()
-        .padding(12.0)
-        .gap(2.0)
-        .child(text(s.photo.name.clone()).font(t::TITLE).color(t::INK))
-        .child(text(s.status.clone()).font(t::CAPTION).color(t::INK_MUTED));
-
-    let footer = row()
-        .w_full()
-        .padding(12.0)
-        .gap(8.0)
-        .child(button("original", if s.show_original { "Show edit" } else { "Show original" }, |s| s.show_original = !s.show_original))
-        .child(spacer())
-        .child(button("reset", "Reset all", |s| {
-            s.edit = s.edit.without_adjustments();
-            s.save();
-        }));
-
-    let histogram = col().w_full().px(12.0).pb(12.0).child(curves::histogram_panel(&s.histogram));
-    let panel = col()
-        .key("panel")
-        .w(300.0)
-        .h_full()
-        .min_h(0.0)
-        .fill(t::BG_PANEL)
-        .child(header)
-        .child(histogram)
-        .child(rule())
-        .child(sections)
-        .child(rule())
-        .child(footer);
-
-    row().w_full().h_full().fill(t::BG_CANVAS).child(stage).child(panel)
-}
-
-fn rule() -> El {
-    el().w_full().h(1.0).fill(t::LINE)
-}
-
-/// A panel section: a heading with an eye toggle that hides its edits, then its controls.
-fn section(key: &'static str, title: &'static str, enabled: bool, toggle: fn(&mut Edit), content: El) -> El {
-    let head = row()
-        .w_full()
-        .h(36.0)
-        .px(12.0)
-        .center_y()
-        .child(text(title).font(t::HEADING).color(t::INK))
-        .child(spacer())
-        .child(
-            el().key(format!("{key}-toggle"))
-                .role("button")
-                .label(if enabled { format!("Hide {title} edits") } else { format!("Show {title} edits") })
-                .h(24.0)
-                .px(8.0)
-                .center()
-                .radius(7.0)
-                .hover(t::BG_HOVER)
-                .on_press(move |s: &mut State| {
-                    toggle(&mut s.edit);
-                    s.save();
-                })
-                .child(text(if enabled { "Hide" } else { "Show" }).font(t::CAPTION).color(t::INK_MUTED)),
-        );
-    let mut body = col().w_full().px(12.0).pb(16.0).child(content);
-    if !enabled {
-        body = body.dim(0.45);
-    }
-    col().key(key).w_full().child(head).child(body).child(rule())
-}
-
-fn sliders(adjustments: &'static [Adjustment], e: &Edit) -> El {
-    adjustments.iter().fold(col().w_full().gap(12.0), |c, a| c.child(slider(*a, (a.get)(e))))
-}
-
-fn readout(r: Readout, v: f32) -> String {
-    let s = match r {
-        Readout::Stops if v.abs() < 0.005 => "0.00".to_owned(),
-        Readout::Stops => format!("{v:+.2}"),
-        Readout::Whole if v.round() == 0.0 => "0".to_owned(),
-        Readout::Whole => format!("{:+.0}", v.round()),
-    };
-    // A real minus sign, as the design system asks.
-    s.replace('-', "−")
-}
-
-/// The design system's AdjustSlider: label and value over a track whose accent fill runs from
-/// zero (centre for bipolar sliders, left for unipolar) to the thumb. Drag or click to set,
-/// double-click to reset; the edit saves when the pointer lifts.
-fn slider(a: Adjustment, value: f32) -> El {
-    let span = a.max - a.min;
-    let frac = ((value - a.min) / span).clamp(0.0, 1.0);
-    let zero = ((0.0 - a.min) / span).clamp(0.0, 1.0);
-    let (lo, hi) = (frac.min(zero), frac.max(zero));
-    let changed = value.abs() > 1e-4;
-    let header = row()
-        .w_full()
-        .child(text(a.label).font(t::LABEL).color(if changed { t::INK } else { t::INK_MUTED }))
-        .child(spacer())
-        .child(text(readout(a.readout, value)).font(t::VALUE).color(t::INK));
-    let mut track = el()
-        .key(a.key)
-        .role("slider")
-        .label(a.label)
-        .w(TRACK)
-        .h(16.0)
-        .child(el().absolute(0.0, 6.0).w(TRACK).h(4.0).radius(2.0).fill(t::BG_ACTIVE))
-        .child(el().absolute(lo * TRACK, 6.0).w((hi - lo) * TRACK).h(4.0).radius(2.0).fill(t::ACCENT));
-    if zero > 0.0 {
-        track = track.child(el().absolute(zero * TRACK - 0.5, 3.0).w(1.0).h(10.0).fill(t::LINE_STRONG));
-    }
-    let (min, max, set) = (a.min, a.max, a.set);
-    let track = track
-        .child(el().absolute(frac * TRACK - 6.0, 2.0).size(12.0, 12.0).radius(6.0).fill(t::INK))
-        .on_drag(move |s: &mut State, g: &mut Drag, tx: &mut Tx| {
-            tx.instant();
-            match g.phase {
-                Phase::Down => {
-                    let v = min + (g.x / g.w.max(1.0)).clamp(0.0, 1.0) * span;
-                    g.data = v;
-                    set(&mut s.edit, v);
-                }
-                Phase::Move => set(&mut s.edit, (g.data + g.dx / g.w.max(1.0) * span).clamp(min, max)),
-                Phase::Up => s.save(),
-            }
-        })
-        .on_double_press(move |s: &mut State| {
-            set(&mut s.edit, 0.0);
-            s.save();
-        });
-    col().w_full().gap(6.0).child(header).child(track)
-}
-
-fn button(key: &'static str, label: &'static str, press: fn(&mut State)) -> El {
-    el().key(key)
-        .role("button")
-        .label(label)
-        .h(28.0)
-        .px(12.0)
-        .center()
-        .radius(7.0)
-        .fill(t::BG_RAISED)
-        .hover(t::BG_HOVER)
-        .on_press(press)
-        .child(text(label).font(t::BODY).color(t::INK))
 }
 
 // ---- drawing ----------------------------------------------------------------------------------
 
-/// Draws RUNE's frame, running the develop pass first when the edit changed and painting the
+/// Draws RUNE's frame, running the develop passes first when the edit changed and painting the
 /// developed photo at the photo slot. Everything stays on RUNE's device.
 #[derive(Default)]
 struct Preview {
@@ -392,13 +434,15 @@ impl Compositor<State> for Preview {
         let develop = &mut self.gpu.as_mut().expect("made above").1;
 
         let s = &mut f.rt.state;
-        if develop.photo_id() != Some(s.photo.id) {
-            develop.set_photo(f.device, f.queue, s.photo.id, s.photo.size, &s.photo.rgba);
+        if s.module == Module::Develop {
+            if develop.photo_id() != Some(s.photo.id) {
+                develop.set_photo(f.device, f.queue, s.photo.id, s.photo.size, &s.photo.rgba);
+            }
+            if let Some((id, pixel)) = s.probe_request.take() {
+                develop.probe(id, pixel);
+            }
+            develop.update(f.device, f.queue, &s.shown());
         }
-        if let Some((id, pixel)) = s.probe_request.take() {
-            develop.probe(id, pixel);
-        }
-        develop.update(f.device, f.queue, &s.shown());
 
         let (device, queue, clear) = (f.device, f.queue, f.rt.clear_color());
         f.ui.prepare(device, queue, &mut f.rt.text.atlas, &f.rt.instances, f.size);
@@ -414,40 +458,65 @@ impl Compositor<State> for Preview {
     }
 }
 
+/// Puts a scene's edit on the test chart in Develop.
+fn develop_scene(s: &mut State) {
+    s.module = Module::Develop;
+}
+
 fn main() {
     let spec = AppSpec {
-        min_size: Some((900.0, 600.0)),
-        setup: Some(|s: &mut State, waker: Waker| s.waker = Some(waker)),
+        min_size: Some((1000.0, 640.0)),
+        setup: Some(setup),
         poll: Some(poll),
+        on_key: Some(on_key),
         // For headless snapshots: `-- --snap out.png --scene <name>`.
         scenes: &[
+            ("develop", develop_scene),
             ("edited", |s: &mut State| {
+                develop_scene(s);
                 let l = &mut s.edit.light;
                 (l.exposure, l.brilliance, l.highlights, l.shadows, l.contrast, l.black_point) = (0.35, 22.0, -42.0, 18.0, 12.0, 8.0);
                 (s.edit.color.saturation, s.edit.color.vibrance, s.edit.color.temperature) = (10.0, 24.0, 6.0);
             }),
             ("curves", |s: &mut State| {
+                develop_scene(s);
                 s.edit.curves.rgb = Curve::new(vec![[0.0, 0.04], [0.25, 0.21], [0.5, 0.5], [0.75, 0.79], [1.0, 0.97]]);
                 s.edit.curves.red = Curve::new(vec![[0.0, 0.0], [0.5, 0.54], [1.0, 1.0]]);
                 s.curve_point = Some(1);
             }),
             ("curve-red", |s: &mut State| {
+                develop_scene(s);
                 s.edit.curves.red = Curve::new(vec![[0.0, 0.0], [0.5, 0.54], [1.0, 1.0]]);
                 s.curve_channel = Channel::Red;
             }),
             ("extreme", |s: &mut State| {
+                develop_scene(s);
                 (s.edit.light.exposure, s.edit.color.saturation, s.edit.detail.vignette) = (1.5, 100.0, 60.0);
+            }),
+            ("definition", |s: &mut State| {
+                develop_scene(s);
+                s.edit.detail.definition = 70.0;
+            }),
+            ("sharpen", |s: &mut State| {
+                develop_scene(s);
+                s.edit.detail.sharpening = 80.0;
+            }),
+            ("denoise", |s: &mut State| {
+                develop_scene(s);
+                s.edit.detail.noise_reduction = 70.0;
             }),
             // A strong warm cast, for checking the grey point picker removes it.
             ("warm", |s: &mut State| {
+                develop_scene(s);
                 s.edit.color.temperature = 70.0;
             }),
             ("hidden", |s: &mut State| {
+                develop_scene(s);
                 s.edit.light.exposure = 1.0;
                 s.edit.light.enabled = false;
             }),
         ],
-        ..AppSpec::new("Darkroom", (1280.0, 800.0), init, view)
+        ..AppSpec::new("Darkroom", (1440.0, 900.0), init, view)
     };
     rune::tooling::run_with(spec, Preview::default());
 }
