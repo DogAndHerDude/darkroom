@@ -1,7 +1,7 @@
 //! Small pieces both modules use, built to the design system: hairlines, buttons, segmented
 //! controls, the rating stars and the top bar.
 
-use rune::{Color, El, Shape, canvas, el, row, spacer, text};
+use rune::{Color, El, LineCap, Path, Shape, canvas, el, row, spacer, text};
 
 use crate::theme as t;
 use crate::{Module, State};
@@ -12,6 +12,11 @@ pub fn rule() -> El {
 
 pub fn vrule() -> El {
     el().w(1.0).h_full().fill(t::LINE)
+}
+
+/// The short divider between groups of controls in a bar.
+pub fn divider() -> El {
+    el().w(1.0).h(16.0).fill(t::LINE)
 }
 
 /// The design system's secondary Button.
@@ -42,6 +47,52 @@ pub fn icon_button(key: &'static str, label: &'static str, icon: fn(Color) -> Sh
         .disabled(!enabled)
         .child(canvas(icon(if enabled { t::INK_MUTED } else { t::INK_FAINT })).size(16.0, 16.0));
     if enabled { b.hover(t::BG_HOVER).on_press(press) } else { b }
+}
+
+/// The small IconButton as a toggle: accent-tinted while `on`.
+pub fn icon_toggle(key: impl Into<String>, label: impl Into<String>, icon: fn(Color) -> Shape, on: bool, press: impl Fn(&mut State) + 'static) -> El {
+    el().key(key.into())
+        .role("button")
+        .label(label.into())
+        .checked(on)
+        .size(24.0, 24.0)
+        .center()
+        .radius(7.0)
+        .fill(if on { t::ACCENT_SOFT } else { Color::TRANSPARENT })
+        .hover(if on { t::ACCENT_SOFT } else { t::BG_HOVER })
+        .on_press(press)
+        .child(canvas(icon(if on { t::ACCENT_INK } else { t::INK_MUTED })).size(16.0, 16.0))
+}
+
+/// The design's eye in a 20 × 20 box: hides a section's edits.
+pub fn eye_icon(color: Color) -> Shape {
+    let lids = Path::new()
+        .move_to([2.5, 10.0])
+        .cubic_to([2.5, 10.0], [5.2, 5.0], [10.0, 5.0])
+        .cubic_to([14.8, 5.0], [17.5, 10.0], [17.5, 10.0])
+        .cubic_to([17.5, 10.0], [14.8, 15.0], [10.0, 15.0])
+        .cubic_to([5.2, 15.0], [2.5, 10.0], [2.5, 10.0])
+        .close();
+    let pupil: Vec<[f32; 2]> = (0..=16).map(|i| {
+        let a = std::f32::consts::TAU * i as f32 / 16.0;
+        [10.0 + 2.2 * a.cos(), 10.0 + 2.2 * a.sin()]
+    }).collect();
+    Shape::new().stroke_path(&lids, 1.5, LineCap::Round, color).stroke(pupil, 1.5, color).view_box(20.0, 20.0)
+}
+
+/// The design's eyedropper in a 20 × 20 box: picks something from the photo.
+pub fn eyedropper_icon(color: Color) -> Shape {
+    // The bulb: most of a circle about (14.65, 4.35), closed across the collar.
+    let mut bulb: Vec<[f32; 2]> = (0..=8).map(|i| {
+        let a = std::f32::consts::PI * (i as f32 / 8.0 - 0.75);
+        [14.65 + 1.77 * a.cos(), 4.35 + 1.77 * a.sin()]
+    }).collect();
+    bulb.extend([[14.2, 7.3], [11.7, 4.8], [13.4, 3.1]]);
+    Shape::new()
+        .stroke(bulb, 1.5, color)
+        .stroke(vec![[11.0, 5.1], [14.9, 9.0]], 1.5, color)
+        .stroke(vec![[12.3, 6.2], [5.5, 13.0], [5.1, 13.8], [4.6, 16.0], [6.8, 15.5], [7.6, 15.1], [14.4, 8.3]], 1.5, color)
+        .view_box(20.0, 20.0)
 }
 
 /// The design's undo arrow in a 20 × 20 box: an arrowhead at the left of a line that hooks

@@ -27,6 +27,8 @@ pub enum Msg {
     Folder { generation: u64, folder: PathBuf, entries: Vec<Entry> },
     Thumb { path: PathBuf, width: u32, height: u32, rgba: Vec<u8> },
     Opened { path: PathBuf, result: Result<Box<(Photo, Edit)>, String> },
+    /// The open photo decoded at full size, for 100% zoom.
+    Full { photo: u64, result: Result<Box<Full>, String> },
     /// A photo decoded at export size, ready for the GPU.
     ExportPrepared { run: u64, index: usize, result: Result<Box<Prepared>, String> },
     /// A photo written (or not) by an export.
@@ -40,6 +42,16 @@ pub struct Prepared {
     pub pixels: Pixels,
     pub edit: Edit,
     /// Pixels here per pixel of the preview this photo is edited on, for the detail tools.
+    pub detail_scale: f32,
+}
+
+/// A photo at its own size, for 100% zoom.
+pub struct Full {
+    /// The id of the preview (`Photo::id`) this is the full size of.
+    pub photo: u64,
+    pub size: [u32; 2],
+    /// Taken by the compositor when it uploads them, so they are held only once.
+    pub pixels: Option<Pixels>,
     pub detail_scale: f32,
 }
 
@@ -145,6 +157,17 @@ impl Jobs {
         self.spawn("export", move || {
             let result = prepare(&path, long_edge).map(Box::new);
             Msg::ExportPrepared { run, index, result }
+        });
+    }
+
+    /// Decodes the open photo (the preview with id `photo`) at full size.
+    pub fn full(&self, photo: u64, path: PathBuf) {
+        self.spawn("full", move || {
+            let result = photo::decode(&path).map(|img| {
+                let (size, pixels) = Pixels::from_image(img);
+                Box::new(Full { photo, size, pixels: Some(pixels), detail_scale: detail_scale(size, size) })
+            });
+            Msg::Full { photo, result }
         });
     }
 

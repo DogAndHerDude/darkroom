@@ -3,12 +3,13 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use darkroom_core::exif::Exif;
 use darkroom_core::raf;
 use darkroom_render::Source;
 use image::{DynamicImage, ImageDecoder, ImageReader, imageops::FilterType};
 
 /// The longest edge of the preview the develop pass runs on. Full resolution is for 100% zoom
-/// and export, later.
+/// and export.
 pub const PREVIEW_EDGE: u32 = 2560;
 
 pub struct Photo {
@@ -16,7 +17,10 @@ pub struct Photo {
     pub id: u64,
     pub name: String,
     pub size: [u32; 2],
+    /// The photo's own size; larger than `size` when the preview was scaled down.
+    pub full_size: [u32; 2],
     pub pixels: Pixels,
+    pub exif: Exif,
     /// Counts of each encoded value, 0..=255: luminance, red, green, blue. Of the unedited
     /// photo for now; the live histogram of the edit needs a GPU readback.
     pub histogram: [[u32; 256]; 4],
@@ -100,12 +104,33 @@ impl Photo {
     /// Decodes a photo and scales it to preview size.
     pub fn open(path: &str) -> Result<Photo, String> {
         let mut img = decode(Path::new(path))?;
+        let full_size = [img.width(), img.height()];
         if img.width().max(img.height()) > PREVIEW_EDGE {
             img = img.resize(PREVIEW_EDGE, PREVIEW_EDGE, FilterType::Triangle);
         }
         let name = Path::new(path).file_name().map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned());
         let (size, pixels) = Pixels::from_image(img);
-        Ok(Photo { id: next_id(), name, size, histogram: pixels.histogram(), pixels })
+        Ok(Photo { id: next_id(), name, size, full_size, exif: Exif::read(Path::new(path)), histogram: pixels.histogram(), pixels })
+    }
+
+    /// The photo as decoded around `pixel`, in linear light (sRGB primaries): the mean of the
+    /// 5 × 5 pixels there, so one noisy pixel doesn't decide a white balance.
+    pub fn linear_at(&self, pixel: [u32; 2]) -> [f32; 3] {
+        let [w, h] = self.size;
+        let mut sum = [0.0f32; 3];
+        let mut count = 0.0;
+        for y in pixel[1].saturating_sub(2)..(pixel[1] + 3).min(h) {
+            for x in pixel[0].saturating_sub(2)..(pixel[0] + 3).min(w) {
+                let i = ((y * w + x) * 4) as usize;
+                let rgb = match &self.pixels {
+                    Pixels::Srgb8(v) => [v[i], v[i + 1], v[i + 2]].map(srgb_decode),
+                    Pixels::LinearHalf(v) => [v[i], v[i + 1], v[i + 2]].map(|b| half::f16::from_bits(b).to_f32()),
+                };
+                sum = [sum[0] + rgb[0], sum[1] + rgb[1], sum[2] + rgb[2]];
+                count += 1.0;
+            }
+        }
+        sum.map(|v| v / f32::max(count, 1.0))
     }
 
     /// A 3:2 chart to judge the adjustments by without a photo: a grey ramp across the top half,
@@ -130,8 +155,14 @@ impl Photo {
                 rgba.extend_from_slice(&[(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8, 255]);
             }
         }
-        Photo { id: next_id(), name: "Test chart".into(), size: [w, h], histogram: histogram(&rgba), pixels: Pixels::Srgb8(rgba) }
+        Photo { id: next_id(), name: "Test chart".into(), size: [w, h], full_size: [w, h], exif: Exif::default(), histogram: histogram(&rgba), pixels: Pixels::Srgb8(rgba) }
     }
+}
+
+/// An sRGB-encoded byte as linear light, as the GPU decodes an `*Srgb` texture.
+fn srgb_decode(b: u8) -> f32 {
+    let v = b as f32 / 255.0;
+    if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
 }
 
 /// A fully saturated hue, `h` in 0..1.

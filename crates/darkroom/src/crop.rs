@@ -222,7 +222,7 @@ pub fn panel(s: &State) -> El {
         .py(12.0)
         .gap(16.0)
         .child(col().w_full().gap(8.0).child(text("Aspect").font(t::LABEL).color(t::INK_MUTED)).child(aspects))
-        .child(slider(STRAIGHTEN, g.straighten))
+        .child(slider(STRAIGHTEN, s))
         .child(
             col()
                 .w_full()

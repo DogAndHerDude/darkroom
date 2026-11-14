@@ -74,6 +74,28 @@ pub fn white_balance(temperature: f32, tint: f32) -> [f32; 4] {
     [r / y, g / y, b / y, 0.0]
 }
 
+/// The Temperature and Tint (−100..100) that make `rgb` neutral: the inverse of
+/// [`white_balance`], kept to the sliders' range. `rgb` is a pixel of the photo as decoded, in
+/// linear Rec.2020. None when a channel is empty, which no white balance can make grey.
+pub fn neutral_point(rgb: [f32; 3]) -> Option<[f32; 2]> {
+    let [r, g, b] = rgb;
+    if r.min(g).min(b) <= 0.0 {
+        return None;
+    }
+    let temperature = (b / r).log2() / (2.0 * TEMPERATURE_STOPS);
+    let tint = (g / (r * b).sqrt()).log2() / TINT_STOPS;
+    Some([temperature, tint].map(|v| (v * 100.0).clamp(-100.0, 100.0)))
+}
+
+/// Linear sRGB-primary values in the working space (`srgb_to_2020` in `common.wgsl`).
+pub fn srgb_to_rec2020([r, g, b]: [f32; 3]) -> [f32; 3] {
+    [
+        0.627404 * r + 0.329283 * g + 0.043313 * b,
+        0.069097 * r + 0.919540 * g + 0.011362 * b,
+        0.016391 * r + 0.088013 * g + 0.895595 * b,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,6 +132,24 @@ mod tests {
         }
         let warm = white_balance(1.0, 0.0);
         assert!(warm[0] > warm[2], "warmer means more red than blue");
+    }
+
+    #[test]
+    fn the_neutral_point_of_a_cast_removes_it() {
+        // Casts the sliders can reach: Temperature moves red against blue by 0.6 stops at most.
+        for rgb in [[0.30, 0.25, 0.22], [0.20, 0.22, 0.27], [0.4, 0.4, 0.4]] {
+            let [t, g] = neutral_point(rgb).expect("no empty channel");
+            let m = white_balance(t / 100.0, g / 100.0);
+            let out = [rgb[0] * m[0], rgb[1] * m[1], rgb[2] * m[2]];
+            assert!((out[0] - out[1]).abs() < 1e-5 && (out[1] - out[2]).abs() < 1e-5, "{rgb:?} became {out:?}");
+        }
+        assert_eq!(neutral_point([0.4, 0.4, 0.4]), Some([0.0, 0.0]), "grey is already neutral");
+    }
+
+    #[test]
+    fn the_neutral_point_stays_on_the_sliders() {
+        assert_eq!(neutral_point([1.0, 0.5, 0.001]), Some([-100.0, 100.0]));
+        assert_eq!(neutral_point([0.2, 0.0, 0.2]), None);
     }
 
     #[test]

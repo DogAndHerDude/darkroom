@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use darkroom_core::{Curves, Edit};
 
 pub use export::Exported;
-pub use params::Params;
+pub use params::{Params, neutral_point, srgb_to_rec2020};
 use readback::Readback;
 
 /// Samples per curve in the lookup table the develop shader reads (`LUT_SIZE` there).

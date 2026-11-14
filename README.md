@@ -21,16 +21,16 @@ Phase: **implementation.** Every v1 area has a working first version. What follo
 
 | Area | What works |
 | --- | --- |
-| Preview | GPU develop pipeline drawn inside the RUNE window; fit-to-view only |
+| Preview | GPU develop pipeline drawn inside the RUNE window; Fit or 100% (the top-bar control or `Z`), where the full-size photo is developed and shown pixel for pixel; drag or scroll to pan |
 | Edit files | `.darkroom` beside each photo: read on open, written on slider release, removed when the edit is empty |
 | Light | Exposure, Brilliance, Highlights, Shadows, Brightness, Contrast, Black point. Brilliance, Highlights and Shadows act on regions, not single pixels |
-| Color | Saturation, Vibrance, Temperature, Tint |
-| Curves | RGB, R, G, B: add, drag and remove points (double-click); live histogram behind; black, grey and white point pickers on the photo |
+| Color | Saturation, Vibrance, Temperature, Tint; a neutral-point picker (the eyedropper in the section header) sets Temperature and Tint from a click on the photo |
+| Curves | RGB, R, G, B: add, drag and remove points (double-click); live histogram behind; black, grey and white point pickers on the photo. Every picker shows the pixel's R G B beside the pointer; Esc puts it down |
 | Detail | Definition, Sharpening, Noise reduction, Vignette; same reach at any render size |
-| Sliders | Drag; double-click the track to reset |
-| Sections | "Hide"/"Show" a section's edits; Show original; Reset all |
+| Sliders | Drag; double-click the track or the label to reset; click the value to type one (Return or a click elsewhere sets it, Esc cancels) |
+| Sections | The eye icon hides or shows a section's edits; Show original; Reset all |
 | Undo/redo | ⌘Z and ⇧⌘Z, or the arrows in the top bar, in Develop. One step per finished change (a slider drag, a curve point, a crop, a reset); each photo keeps its steps until the app quits |
-| Histogram | Live from the GPU, at the top of the panel |
+| Histogram | Live from the GPU, at the top of the panel, with the photo's aperture, shutter, ISO and focal length under it |
 | Crop | Aspect presets (Free, Original, 1:1, 4:5, 16:9), straighten ±45°, rotate 90°, flip; applied in preview and export |
 | Library | Folder tree, thumbnail grid with disk cache, show All/Picks/Rejects, minimum rating, sort by time or name, thumbnail size, info panel with EXIF |
 | Ratings and flags | In the Library and Develop, by click or key |
@@ -47,14 +47,8 @@ In the spec or the designs, with no code yet.
 | --- | --- | --- |
 | Copy/paste edits | ◐ buttons only | Choosing which sections to paste isn't designed |
 | Presets | ✗ | |
-| 100% zoom and panning | ◐ controls only | The preview develops a 2560 px image; 100% needs the full image (export already has that path) |
 | Before/after: hold `\`, split view | ◐ toggle only | "Show original" is a button; no key, no split |
-| White balance neutral-point picker | ◐ | Curves has its pickers; Color has none |
-| Type a value into a slider | ◐ in the slider spec | |
-| Eye icon for hiding a section | ✅ | A text toggle stands in |
 | Histogram clipping toggles and overlay on the photo | ◐ overlay not drawn | |
-| EXIF line under the histogram | ✅ | |
-| Pixel readout next to the cursor while picking | ✅ | Needs a probe on pointer move |
 | Fuji film simulation in the info panel | ✅ | Needs Fujifilm MakerNote parsing |
 | Edited thumbnails | n/a | The grid shows the original (the camera's JPEG for a RAF) |
 | Multi-select in the grid | ✗ | Export is one photo or all shown, nothing between |
@@ -70,7 +64,10 @@ Design column: ✅ designed on the canvas · ◐ partly · ✗ not designed · n
 
 ### Built, but known to be wrong or weak
 
-- **Gamut edge in pure blues:** fully saturated sRGB blues show a hard step once saturation or vibrance pushes them out of gamut. Visible on the test chart's blue ramp at +10 / +24. Oklab's hue isn't constant around blue, which is a likely cause. This reaches exports; deep skies can get close.
+- **Out-of-gamut colour:** the hard step in saturated blues is gone (largest neighbour step on a generated blue chart went from 38 levels to 3 or less at moderate settings). Hue and lightness are kept in Oklab, but how much chroma survives is read off a straight line in linear RGB, and a small residual is removed along that line, so it is not the nearest in-gamut colour. At Saturation +100 the blue-to-white ramp has a crease in its slope (no step). Checked in sRGB on generated charts only: not through a Display P3 export, not on a real photo.
+- **100% view:** a second full-size pipeline lives on the GPU while a photo is open at 100% (the source plus three `Rgba16Float` textures; roughly 0.7 GB for 26 MP, a guess from the texture sizes, not measured). Slider speed at 100% is unmeasured. Until the full size has decoded, the preview is shown enlarged. The histogram and pickers still read the 2560 px preview. Not compared pixel for pixel with an export of an edited photo; an unedited one matches its source exactly.
+- **Neutral-point picker:** Temperature and Tint only reach ±0.3 and ±0.25 stops, so a strong cast is clamped at ±100 and only partly removed. It reads a 5×5 mean of the source pixels, ignoring the other adjustments.
+- **Designs not followed exactly:** the histogram's clipping squares are left out (no overlay to toggle); the 100% view, the neutral picker in use and the lit eye of a hidden section are not on the canvas (see "Designs still to draw").
 - **Local tone is tuned on one synthetic scene:** the base's two numbers (`EPSILON` in `base.wgsl`, how big a brightness step counts as an edge; `base_radius`, the window, 1/60 of the long edge) are guesses set by eye on a generated backlit scene. Real photos may want others.
 - **Local tone keeps fine texture, not everything:** detail about the size of the window or larger (broad clouds) counts as region and is still flattened, as the old global curves did. A region pushed more than halfway to black or white has its detail compressed too. Brightness and Contrast stay global.
 - **Local tone speed is unmeasured:** five extra quarter-size passes per edit change while Brilliance, Highlights or Shadows are set, and five more for Definition. Not timed on a 26 MP photo or during a drag.
@@ -90,7 +87,9 @@ Design column: ✅ designed on the canvas · ◐ partly · ✗ not designed · n
 Everything was built against generated test images and one downloaded X-T4 RAF.
 
 - The native folder picker (headless runs can't open it), for the library root and the export destination
-- Real Fujifilm JPEGs: EXIF fields, orientation, speed
+- Real Fujifilm JPEGs: EXIF fields, orientation, speed (the EXIF line was seen only on a JPEG with hand-written EXIF)
+- 100% on a real 26 MP JPEG or a RAF: only a generated 5400 × 3600 PNG so far
+- Panning with a real trackpad or mouse wheel (scripted drag and wheel events only)
 - Local tone (Brilliance, Highlights, Shadows) and Definition on any real photo: only a generated backlit scene so far
 - The top bar beside the real traffic lights, and in full screen: checked only against RUNE's headless overlay of where macOS draws them
 - Thumbnail speed on a folder of 26–40 MP files (first visit decodes each one)
@@ -107,7 +106,7 @@ cargo run -p darkroom -- path/to/folder          # browse a folder (not remember
 cargo run -p darkroom -- path/to/photo.jpg       # open a photo in Develop (or a .RAF)
 cargo run -p darkroom -- --snap out.png --scene edited   # headless snapshot, no window
 # DARKROOM_NO_PREFS=1 ignores saved settings (root folder, thumbnail size), for tests
-# Develop scenes on the test chart: develop, edited, curves, curve-red, extreme, warm, hidden, definition, sharpen, denoise, crop, cropped
+# Develop scenes on the test chart: develop, edited, curves, curve-red, extreme, warm, hidden, definition, sharpen, denoise, crop, cropped, zoom, picking
 # (the detail scenes need a photo with texture and noise to show anything)
 # the panel scrolls; for the Curves section in a snapshot add --size 1280x1500
 # drive it: --script events.json (clicks and drags in window points, or "key": an element's key)
@@ -241,6 +240,9 @@ So the preview never leaves the GPU, and processing stays in float until the fin
 ### Designs still to draw
 
 - Detail section, open (it is built, laid out like the other sections)
+- The 100% view: the photo filling the stage, the grab cursor, the "Loading the full size…" note (built without a design)
+- The neutral-point picker: its eyedropper in the Color header and the hint above the photo (built to match the curve pickers)
+- A hidden section's eye (built as the accent-lit icon; the canvas shows only the visible state)
 - Export progress, finished and failed states (built as a plain dialog; wants the Alert component)
 - Before/after split view, and the 100% zoom view
 - Clipping overlay on the photo

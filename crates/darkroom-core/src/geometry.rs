@@ -98,6 +98,14 @@ impl Geometry {
         self.rect_to_source(source, self.effective_crop(source))
     }
 
+    /// The map from a position in `window` (a rectangle of the output, in fractions of it; see
+    /// [`window`]) to a source position.
+    pub fn window_to_source(&self, source: [u32; 2], window: [f32; 4]) -> Affine {
+        let [x, y, w, h] = self.effective_crop(source);
+        let [wx, wy, ww, wh] = window;
+        self.rect_to_source(source, [x + wx * w, y + wy * h, ww * w, wh * h])
+    }
+
     /// Whether this geometry changes anything.
     pub fn is_identity(&self) -> bool {
         *self == Geometry::default()
@@ -118,6 +126,18 @@ pub fn apply(m: Affine, p: [f32; 2]) -> [f32; 2] {
     [m[0] * p[0] + m[1] * p[1] + m[4], m[2] * p[0] + m[3] * p[1] + m[5]]
 }
 
+/// The part of an output of `output` pixels that a view of `view` pixels shows at one output
+/// pixel per view pixel (100% zoom), as fractions of the output: centred on `centre` as nearly
+/// as keeps it on the output. A side of the output shorter than the view shows whole.
+pub fn window(output: [u32; 2], view: [f32; 2], centre: [f32; 2]) -> [f32; 4] {
+    let side = |i: usize| {
+        let len = (view[i] / output[i].max(1) as f32).min(1.0);
+        ((centre[i] - len / 2.0).clamp(0.0, 1.0 - len), len)
+    };
+    let ((x, w), (y, h)) = (side(0), side(1));
+    [x, y, w, h]
+}
+
 /// The largest rectangle of `aspect` (width / height, in pixels) centred on the canvas that fits
 /// a canvas of `canvas` pixels, as fractions. For aspect-ratio crop presets.
 pub fn centred(aspect: f32, canvas: [f32; 2]) -> [f32; 4] {
@@ -135,6 +155,29 @@ mod tests {
 
     fn near(a: [f32; 2], b: [f32; 2]) -> bool {
         (a[0] - b[0]).abs() < 1e-4 && (a[1] - b[1]).abs() < 1e-4
+    }
+
+    #[test]
+    fn a_window_shows_one_output_pixel_per_view_pixel() {
+        assert_eq!(window([3000, 2000], [1500.0, 500.0], [0.5, 0.5]), [0.25, 0.375, 0.5, 0.25]);
+    }
+
+    #[test]
+    fn a_window_stops_at_the_outputs_edges() {
+        assert_eq!(window([3000, 2000], [1500.0, 500.0], [0.0, 2.0]), [0.0, 0.75, 0.5, 0.25]);
+    }
+
+    #[test]
+    fn an_output_smaller_than_the_view_shows_whole() {
+        assert_eq!(window([3000, 2000], [4000.0, 1000.0], [0.9, 0.5]), [0.0, 0.25, 1.0, 0.5]);
+    }
+
+    #[test]
+    fn a_window_maps_into_the_crop() {
+        let g = Geometry { crop: Some([0.25, 0.5, 0.5, 0.5]), ..Geometry::default() };
+        let m = g.window_to_source(SRC, [0.5, 0.0, 0.5, 0.5]);
+        assert!(near(apply(m, [0.0, 0.0]), [0.5, 0.5]) && near(apply(m, [1.0, 1.0]), [0.75, 0.75]));
+        assert_eq!(g.window_to_source(SRC, [0.0, 0.0, 1.0, 1.0]), g.output_to_source(SRC));
     }
 
     #[test]

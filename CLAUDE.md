@@ -64,7 +64,7 @@ Priorities, in the user's words: RGB curves, and the Apple Photos-style basics (
 - Edit files are named `<photo file name>.darkroom` (`DSCF4127.JPG.darkroom`), TOML inside, sparse (missing fields are neutral), removed when the edit is empty.
 - No Apple Photos integration, no HEIC, no cloud sync.
 - One dark theme. Fonts are Rubik and DM Mono; accent `#e2a27a`.
-- Working space is linear Rec.2020 in `Rgba16Float`; curves run on display (sRGB-primary) channels; out-of-gamut colour is brought in by reducing Oklab chroma.
+- Working space is linear Rec.2020 in `Rgba16Float`; curves run on display (sRGB-primary) channels; out-of-gamut colour is brought in by reducing Oklab chroma (the amount comes from a straight line in linear RGB; searching along the Oklab chroma line made a step in blues).
 - RAF is decoded with `rawler`, using its Markesteijn demosaic for X-Trans.
 
 ### Workspace
@@ -157,7 +157,7 @@ export DARKROOM_NO_PREFS=1 HOME=/path/to/scratch/home
 ./target/debug/darkroom path/to/folder --snap out.png --script events.json
 ```
 
-- Scenes: `develop, edited, curves, curve-red, extreme, definition, sharpen, denoise, warm, crop, cropped, hidden`. Add a scene when you add a state worth looking at.
+- Scenes: `develop, edited, curves, curve-red, extreme, definition, sharpen, denoise, warm, crop, cropped, hidden, zoom, picking`. Add a scene when you add a state worth looking at.
 - The right-hand panel scrolls; use `--size 1280x1500` to see the lower sections.
 - `DARKROOM_DEBUG=1` prints each GPU readback.
 
@@ -174,7 +174,7 @@ Script events:
 ]
 ```
 
-- `"key"` on a click is an element key. A keyboard key is `{"type": "key", "name": "Right"}`; typed characters are `{"type": "type", "text": ".."}`.
+- `"key"` on a click is an element key. A keyboard key is `{"type": "key", "name": "Right"}`; typed characters are `{"type": "type", "text": ".."}`. Return is named `Enter`; there are also `double-click` and `wheel` (`dx`, `dy`) events.
 - Script time is virtual and runs faster than real time. Background work (decoding, export, thumbnails) needs real time, so put the last event late (tens of seconds, 100+ for a RAF export), or the run ends before the work does.
 - A click on a key that doesn't exist yet aborts the run. If a button appears only after background work, schedule the click well after it.
 
@@ -194,7 +194,7 @@ The user tests the native folder picker and their own camera files by hand; head
 
 `README.md` under "Status" has the full lists. The ones most likely to bite:
 
-- A hard step in pure saturated blues once saturation pushes them out of gamut.
+- At 100% a second, full-size `Develop` lives in the compositor (`Preview.full`); its memory and slider speed are unmeasured.
 - Thumbnails show the original (or the camera's embedded JPEG for RAF), not the edit.
 - The RAF starting look is a base tone fitted to one X-T4 sample, with no film simulation.
-- No presets, copy/paste of edits, 100% zoom, before/after split, or multi-select yet.
+- No presets, copy/paste of edits, before/after split, or multi-select yet.

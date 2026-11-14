@@ -14,7 +14,8 @@ struct Params {
 const LUMA: vec3<f32> = vec3<f32>(0.2627, 0.6780, 0.0593); // Rec.2020
 const LUMA_SRGB: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
 const EPS: f32 = 1e-6;
-const GAMUT_SLACK: f32 = 1e-3;
+// How far below zero a channel may sit, as a share of the brightest, and still count as in gamut.
+const GAMUT_SLACK: f32 = 1e-4;
 
 // ---- colour spaces --------------------------------------------------------------------------
 
@@ -127,12 +128,35 @@ fn oklab_to_output(lab: vec3<f32>, p3: bool) -> vec3<f32> {
     return c;
 }
 
+// The inverse of `oklab_to_output`'s last step: output-space values as linear sRGB.
+fn output_to_srgb(c: vec3<f32>, p3: bool) -> vec3<f32> {
+    if !p3 { return c; }
+    return vec3<f32>(
+        dot(c, vec3<f32>(1.2249401, -0.2249404, 0.0)),
+        dot(c, vec3<f32>(-0.0420569, 1.0420571, 0.0)),
+        dot(c, vec3<f32>(-0.0196376, -0.0786361, 1.0982735)),
+    );
+}
+
+// `c` moved along the straight line towards the grey (r = g = b = `grey`) until no channel is
+// negative. The gamut is convex in linear light, so this is one point and it moves smoothly
+// with `c`.
+fn towards_grey(c: vec3<f32>, grey: f32) -> vec3<f32> {
+    let low = min(c.r, min(c.g, c.b));
+    if low >= 0.0 {
+        return c;
+    }
+    return mix(vec3<f32>(grey), c, grey / (grey - low));
+}
+
 // Rec.2020 working values to display-referred linear values in 0..1, in sRGB or (`p3`) Display
 // P3 primaries.
 fn output(c_in: vec3<f32>, p3: bool) -> vec3<f32> {
     var c = select(rec2020_to_srgb(c_in), rec2020_to_p3(c_in), p3);
     // Colours already in range are untouched, so an unedited photo comes out exactly as it went
-    // in. Tiny overshoots are round-off from the colour-space trips and are just clamped.
+    // in. Tiny overshoots are round-off from the colour-space trips and are just clamped. Tiny
+    // is relative to the colour: a fixed allowance is several levels wide in the shadows, and
+    // showed as a step where a dark ramp crossed it.
     //
     // Past white: scale all three channels down by the brightest, which keeps hue and
     // saturation (a bright yellow stays yellow rather than clipping into a band).
@@ -142,28 +166,20 @@ fn output(c_in: vec3<f32>, p3: bool) -> vec3<f32> {
     if m > 1.0 {
         c = c / m;
     }
-    // Too saturated for sRGB: lose chroma at constant Oklab lightness and hue until no channel
-    // is negative (a bisection on the chroma scale).
-    if min(c.r, min(c.g, c.b)) < -GAMUT_SLACK {
-        // Oklab works from linear sRGB; a P3 colour converts there first (the inverse of
-        // srgb_to_p3).
-        var srgb = c;
-        if p3 {
-            srgb = vec3<f32>(
-                dot(c, vec3<f32>(1.2249401, -0.2249404, 0.0)),
-                dot(c, vec3<f32>(-0.0420569, 1.0420571, 0.0)),
-                dot(c, vec3<f32>(-0.0196376, -0.0786361, 1.0982735)),
-            );
-        }
-        let lab = srgb_to_oklab(srgb);
-        var lo = 0.0;
-        var hi = 1.0;
-        for (var i = 0; i < 14; i++) {
-            let k = (lo + hi) * 0.5;
-            let t = oklab_to_output(vec3<f32>(lab.x, lab.yz * k), p3);
-            if min(t.r, min(t.g, t.b)) < -GAMUT_SLACK { hi = k; } else { lo = k; }
-        }
-        c = oklab_to_output(vec3<f32>(lab.x, lab.yz * lo), p3);
+    // Too saturated for the output space: lose chroma at constant Oklab lightness and hue.
+    if min(c.r, min(c.g, c.b)) < -GAMUT_SLACK * min(m, 1.0) {
+        let lab = srgb_to_oklab(output_to_srgb(c, p3));
+        // The grey of the same lightness: an Oklab colour with no chroma has three equal channels.
+        let grey = pow(max(lab.x, 0.0), 3.0);
+        // How much chroma survives is read off a straight line in linear light, from that grey
+        // to the colour, where it enters the gamut. Searching along the Oklab chroma line itself
+        // doesn't work: around blue that line leaves the gamut, comes back and leaves again, so
+        // the answer jumps between neighbouring colours (a hard step in a blue ramp).
+        let inside = srgb_to_oklab(output_to_srgb(towards_grey(c, grey), p3));
+        let k = min(length(inside.yz) / max(length(lab.yz), EPS), 1.0);
+        // The Oklab colour with that chroma can still sit a little outside; the same straight
+        // line brings in what is left, by too little to show as a hue shift.
+        c = towards_grey(oklab_to_output(vec3<f32>(lab.x, lab.yz * k), p3), grey);
     }
     // Far past white, a colour burns out: it fades towards white with how far its luminance
     // went over, gently at first, so slightly over-bright colours keep theirs. Luminance, not

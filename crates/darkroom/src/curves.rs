@@ -10,7 +10,9 @@ use rune::{Color, Drag, El, LineCap, Phase, Shape, Tx, canvas, col, el, row, spa
 pub use darkroom_core::Picker;
 
 use crate::State;
+use crate::develop::Pick;
 use crate::theme as t;
+use crate::ui::eyedropper_icon;
 
 /// What a picker makes the clicked pixel, for the hint over the photo.
 pub fn target(p: Picker) -> &'static str {
@@ -82,16 +84,11 @@ pub fn body(s: &State) -> El {
 
 /// Black, grey and white point pickers: the design system's toolbar of small icon buttons, each
 /// an eyedropper with a swatch of what it sets. The active one is accent-tinted.
-fn pickers(active: Option<Picker>, waiting: bool) -> El {
+fn pickers(active: Option<Pick>, waiting: bool) -> El {
     let mut tray = row().padding(2.0).gap(2.0).radius(9.0).fill(t::BG_RAISED);
     for (p, swatch) in [(Picker::Black, t::BG_CANVAS), (Picker::Grey, t::LINE_STRONG), (Picker::White, t::INK)] {
-        let on = active == Some(p);
+        let on = active == Some(Pick::Point(p));
         let ink = if on { t::ACCENT_INK } else if waiting { t::INK_FAINT } else { t::INK_MUTED };
-        let icon = Shape::new()
-            .stroke(vec![[13.4, 3.1], [15.9, 5.6]], 1.5, ink)
-            .stroke(vec![[12.3, 6.2], [6.5, 12.0]], 1.5, ink)
-            .stroke(vec![[11.0, 5.1], [14.9, 9.0]], 1.5, ink)
-            .view_box(20.0, 20.0);
         tray = tray.child(
             el().key(format!("picker-{}", target(p)))
                 .role("button")
@@ -101,8 +98,8 @@ fn pickers(active: Option<Picker>, waiting: bool) -> El {
                 .radius(7.0)
                 .fill(if on { t::ACCENT_SOFT } else { Color::TRANSPARENT })
                 .hover(if on { t::ACCENT_SOFT } else { t::BG_HOVER })
-                .on_press(move |s: &mut State| s.picker = if s.picker == Some(p) { None } else { Some(p) })
-                .child(canvas(icon).absolute(4.0, 4.0).size(16.0, 16.0))
+                .on_press(move |s: &mut State| s.toggle_picker(Pick::Point(p)))
+                .child(canvas(eyedropper_icon(ink)).absolute(4.0, 4.0).size(16.0, 16.0))
                 .child(el().absolute(4.0, 15.0).size(6.0, 6.0).radius(3.0).fill(swatch).border(1.0, t::LINE_STRONG)),
         );
     }
@@ -110,22 +107,27 @@ fn pickers(active: Option<Picker>, waiting: bool) -> El {
 }
 
 /// The histogram at the top of the panel: red, green and blue over luminance, on the canvas
-/// ground, as the design system's Histogram.
-pub fn histogram_panel(h: &Histogram) -> El {
+/// ground, as the design system's Histogram, with the photo's exposure line (`exif`, empty
+/// when the file has none) under it.
+pub fn histogram_panel(h: &Histogram, exif: &str) -> El {
     const W: f32 = 260.0;
     const H: f32 = 80.0;
     let mut shape = Shape::new().fill(area(h, Channel::Rgb, W, H, 0.92), t::CHAN_LUMA.alpha(0.35));
     for c in [Channel::Blue, Channel::Green, Channel::Red] {
         shape = shape.fill(area(h, c, W, H, 0.92), tint(c).alpha(0.45));
     }
-    el().key("histogram")
+    let line = (!exif.is_empty()).then(|| text(exif).key("exif").font(t::VALUE_SM).color(t::INK_MUTED));
+    col().key("histogram")
         .role("image")
         .label("Histogram")
         .w_full()
-        .h(H + 16.0)
+        .padding(8.0)
+        .gap(6.0)
+        .items_center()
         .radius(7.0)
         .fill(t::BG_CANVAS)
-        .child(canvas(shape.view_box(W, H)).absolute(8.0, 8.0).size(W, H))
+        .child(canvas(shape.view_box(W, H)).size(W, H))
+        .children(line)
 }
 
 /// RGB, Red, Green, Blue: the design system's SegmentedControl.

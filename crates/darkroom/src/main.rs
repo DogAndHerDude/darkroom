@@ -21,15 +21,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use darkroom_core::library::{Entry, Filter, Folder, Sort};
-use darkroom_core::geometry::Affine;
+use darkroom_core::geometry::{self, Affine};
 use darkroom_core::{Channel, Curve, Edit, Flag, History, sidecar};
 use darkroom_render::{Develop, Histogram, Placement, Results};
 use rune::compose::DeviceKey;
 use rune::prefs::Prefs;
-use rune::{App, AppSpec, Chrome, Compositor, Cx, El, Frame, Image, ImageCache, Key, KeyEvent, Tx, Waker};
+use rune::{App, AppSpec, Chrome, Compositor, Cx, El, Frame, Image, ImageCache, Key, KeyEvent, TextEdit, Tx, Waker};
 
 use crate::curves::Picker;
-use crate::jobs::{Jobs, Msg, Prepared};
+use crate::develop::{Adjustment, Pick, Zoom};
+use crate::jobs::{Full, Jobs, Msg, Prepared};
 use crate::photo::Photo;
 
 /// The effect slot the photo is drawn into.
@@ -90,13 +91,33 @@ struct State {
     crop_aspect: Option<f32>,
     /// The crop when the current drag on its frame began.
     crop_start: Option<[f32; 4]>,
-    /// The active curve point picker: the next click on the photo sets points from that pixel.
-    picker: Option<Picker>,
+    /// The active picker: the next click on the photo sets something from that pixel.
+    picker: Option<Pick>,
     /// A pixel the compositor should probe: (request id, photo pixel).
     probe_request: Option<(u64, [u32; 2])>,
-    /// The picker the outstanding probe is for, by request id.
+    /// The curve picker the outstanding probe is for, by request id.
     probe_for: Option<(u64, Picker)>,
     next_probe: u64,
+    /// Where the pointer is over the photo while a picker is active, in the slot's points.
+    hover: Option<[f32; 2]>,
+    /// The outstanding probe of the pixel under the pointer: (request id, photo pixel).
+    hover_probe: Option<(u64, [u32; 2])>,
+    /// The pixel under the pointer as the curves receive it, for the readout beside it.
+    readout: Option<[f32; 3]>,
+    zoom: Zoom,
+    /// The middle of the 100% view, in fractions of the output.
+    centre: [f32; 2],
+    /// The centre when the current pan began.
+    pan_start: [f32; 2],
+    /// The photo slot's size in points (from layout) and in screen pixels (from the last draw).
+    slot_pts: [f32; 2],
+    slot_px: [f32; 2],
+    /// The open photo at full size, for 100%, and the id of a photo being decoded for it.
+    full: Option<Full>,
+    full_loading: Option<u64>,
+    /// The slider whose value is being typed, and the field it is typed in.
+    entry: Option<Adjustment>,
+    entry_text: TextEdit,
     /// The edited photo's histogram, live from the GPU (the original's until the first arrives).
     histogram: Histogram,
     /// Where the GPU leaves results for `poll` to pick up.
@@ -136,13 +157,23 @@ impl State {
         }
     }
 
-    /// What the photo slot shows: its size in preview pixels and the map from it to the photo.
-    /// The cropped output, or while cropping the whole straightened canvas.
+    /// What the photo slot shows: its size in pixels and the map from it to the photo. The
+    /// cropped output in preview pixels; while cropping the whole straightened canvas; at 100%
+    /// the part of the output that fits the slot, in screen pixels.
     fn view_geometry(&self) -> ([f32; 2], Affine) {
+        self.view_geometry_in(self.slot_px)
+    }
+
+    /// [`Self::view_geometry`] for a slot of `view` screen pixels, which only 100% depends on.
+    fn view_geometry_in(&self, view: [f32; 2]) -> ([f32; 2], Affine) {
         let g = &self.shown().geometry;
         let source = self.photo.size;
         if self.cropping {
             (g.oriented_size(source), g.rect_to_source(source, [0.0, 0.0, 1.0, 1.0]))
+        } else if self.zoom == Zoom::Full {
+            let out = g.output_size(self.photo.full_size);
+            let window = geometry::window(out, view, self.centre);
+            ([window[2] * out[0] as f32, window[3] * out[1] as f32], g.window_to_source(source, window))
         } else {
             (g.output_size(source).map(|v| v as f32), g.output_to_source(source))
         }
@@ -151,6 +182,9 @@ impl State {
     fn set_cropping(&mut self, on: bool) {
         self.cropping = on;
         self.picker = None;
+        if on {
+            self.zoom = Zoom::Fit;
+        }
         if !on {
             self.crop_start = None;
         }
@@ -362,6 +396,19 @@ impl State {
                     self.thumbs.insert(path, images.rgba(width, height, rgba));
                 }
             }
+            Msg::Full { photo, result } => {
+                if photo != self.photo.id {
+                    return;
+                }
+                self.full_loading = None;
+                match result {
+                    Ok(full) => self.full = Some(*full),
+                    Err(e) => {
+                        self.status = format!("Couldn't load the full size: {e}");
+                        self.zoom = Zoom::Fit;
+                    }
+                }
+            }
             Msg::ExportPrepared { run, index, result } => {
                 if self.export_run.as_ref().map(|r| r.id) != Some(run) {
                     return;
@@ -406,7 +453,11 @@ impl State {
                         self.path = Some(path);
                         self.show_original = false;
                         (self.curve_point, self.curve_removing, self.picker, self.probe_for) = (None, false, None, None);
+                        (self.hover, self.hover_probe, self.readout, self.entry) = (None, None, None, None);
                         (self.cropping, self.crop_start) = (false, None);
+                        // 100% stays on from photo to photo, each starting at its middle.
+                        (self.full, self.full_loading, self.centre) = (None, None, [0.5, 0.5]);
+                        self.ensure_full();
                     }
                     Err(e) => {
                         let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
@@ -456,6 +507,18 @@ fn init() -> State {
         probe_request: None,
         probe_for: None,
         next_probe: 1,
+        hover: None,
+        hover_probe: None,
+        readout: None,
+        zoom: Zoom::Fit,
+        centre: [0.5, 0.5],
+        pan_start: [0.5, 0.5],
+        slot_pts: [0.0; 2],
+        slot_px: [0.0; 2],
+        full: None,
+        full_loading: None,
+        entry: None,
+        entry_text: TextEdit::new(""),
         results: Arc::new(Results::default()),
         waker: None,
         export_settings: export::Settings::default(),
@@ -518,14 +581,25 @@ fn poll(s: &mut State, _t: f64, _tx: &mut Tx) -> bool {
         s.histogram = h;
         changed = true;
     }
-    if let Some(probed) = s.results.take_probe()
-        && let Some((id, picker)) = s.probe_for
-        && id == probed.id
-    {
-        curves::apply_picker(&mut s.edit, picker, probed.rgb);
-        s.probe_for = None;
-        s.curve_point = None;
-        s.save();
+    if let Some(probed) = s.results.take_probe() {
+        if let Some((id, picker)) = s.probe_for
+            && id == probed.id
+        {
+            curves::apply_picker(&mut s.edit, picker, probed.rgb);
+            s.probe_for = None;
+            s.curve_point = None;
+            s.save();
+            changed = true;
+        } else if let Some((id, pixel)) = s.hover_probe
+            && id == probed.id
+        {
+            s.hover_probed(pixel, probed.rgb);
+            changed = true;
+        }
+    }
+    // A click away from a slider's value field takes its focus, which ends the typing.
+    if s.entry.is_some() && !s.entry_text.focused {
+        s.commit_entry();
         changed = true;
     }
     changed
@@ -533,8 +607,13 @@ fn poll(s: &mut State, _t: f64, _tx: &mut Tx) -> bool {
 
 /// Keyboard shortcuts, as in Lightroom: 0–5 rate, P pick, X reject, U unflag, ← → move between
 /// photos, Return opens the selected photo in Develop, G or Esc goes back to the Library. ⌘Z
-/// undoes and ⇧⌘Z redoes in Develop.
+/// undoes and ⇧⌘Z redoes in Develop, where Z switches between the whole photo and 100%, and Esc
+/// first puts down a picker.
 fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
+    // Typing a slider's value: every key is the field's.
+    if s.entry.is_some() {
+        return false;
+    }
     if ev.is_command('z') && s.module == Module::Develop && s.export_scope.is_none() && s.export_run.is_none() {
         if ev.mods.shift { s.redo() } else { s.undo() }
         return true;
@@ -548,6 +627,7 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         Key::Escape if s.export_scope.is_some() && s.export_run.is_none() => s.export_scope = None,
         _ if s.export_scope.is_some() || s.export_run.is_some() => return false,
         Key::Enter | Key::Escape if s.cropping => s.set_cropping(false),
+        Key::Escape if s.picker.is_some() && s.module == Module::Develop => s.picker = None,
         Key::Enter if s.module == Module::Library => s.switch_to(Module::Develop),
         Key::Escape if s.module == Module::Develop => s.module = Module::Library,
         Key::Text(t) => {
@@ -560,6 +640,7 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
                 ("g", _) => s.module = Module::Library,
                 ("d", _) => s.switch_to(Module::Develop),
                 ("c", _) if s.module == Module::Develop => s.set_cropping(!s.cropping),
+                ("z", _) if s.module == Module::Develop => s.set_zoom(if s.zoom == Zoom::Fit { Zoom::Full } else { Zoom::Fit }),
                 _ => return false,
             }
         }
@@ -585,6 +666,9 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
 #[derive(Default)]
 struct Preview {
     gpu: Option<(DeviceKey, Develop)>,
+    /// The open photo developed at full size, for 100%: made when its pixels arrive and kept
+    /// while that photo stays open.
+    full: Option<Develop>,
 }
 
 impl Compositor<State> for Preview {
@@ -594,8 +678,13 @@ impl Compositor<State> for Preview {
             let s = &f.rt.state;
             let wake = s.waker.clone().unwrap_or_else(|| Arc::new(|| {}));
             self.gpu = Some((key, Develop::new(f.device, s.results.clone(), wake)));
+            // The full-size copy lived on the old device; its pixels are decoded again.
+            self.full = None;
+            f.rt.state.full = None;
+            f.rt.state.ensure_full();
         }
         let develop = &mut self.gpu.as_mut().expect("made above").1;
+        let full = &mut self.full;
 
         // An export's photo: develop it at export size on a Develop of its own, render it through
         // its geometry, and write the file from the readback thread.
@@ -629,25 +718,54 @@ impl Compositor<State> for Preview {
                 develop.probe(id, pixel);
             }
             develop.update(f.device, f.queue, &s.shown());
+
+            if full.as_ref().is_some_and(|d| d.photo_id() != Some(s.photo.id)) {
+                *full = None;
+            }
+            if let Some(decoded) = s.full.as_mut().filter(|d| d.photo == s.photo.id)
+                && let Some(pixels) = decoded.pixels.take()
+            {
+                let mut gpu = Develop::new(f.device, Arc::new(Results::default()), Arc::new(|| {}));
+                gpu.histogram_enabled = false;
+                gpu.detail_scale = decoded.detail_scale;
+                gpu.set_photo(f.device, f.queue, s.photo.id, decoded.size, pixels.source());
+                *full = Some(gpu);
+            }
+            // Developed only while it shows; the preview above keeps the histogram and probes.
+            if s.zoomed()
+                && let Some(d) = full.as_mut()
+            {
+                d.update(f.device, f.queue, &s.shown());
+            }
         }
 
-        let (output, map) = f.rt.state.view_geometry();
+        // At 100% the full-size photo, once it is here; until then the preview, enlarged.
+        let shown = if f.rt.state.zoomed() { full.as_mut().unwrap_or(develop) } else { develop };
+        let state = &f.rt.state;
+        let mut slot_px = None;
         let (device, queue, clear) = (f.device, f.queue, f.rt.clear_color());
         f.ui.prepare(device, queue, &mut f.rt.text.atlas, &f.rt.instances, f.size);
         f.ui.draw_with(f.encoder, f.target, clear, &mut |pass, site| {
             if site.mark != PHOTO_SLOT {
                 return;
             }
-            develop.prepare_format(device, site.format);
+            shown.prepare_format(device, site.format);
             let [x, y, w, h] = site.instance.rect;
-            let rect = [x - site.origin[0], y - site.origin[1], w, h];
+            let (output, map) = state.view_geometry_in([w, h]);
+            let [px, py, pw, ph] = state.placed([w, h], output);
+            let rect = [x - site.origin[0] + px, y - site.origin[1] + py, pw, ph];
+            slot_px = Some([w, h]);
             let c = theme::BG_CANVAS;
-            develop.draw(
+            shown.draw(
                 queue,
                 pass,
                 Placement { rect, target: site.size, format: site.format, encode_srgb: site.srgb_blend, output, map, background: [c.r, c.g, c.b] },
             );
         });
+        // For the handlers that turn a point on the slot into a place on the photo.
+        if let Some(px) = slot_px {
+            f.rt.state.slot_px = px;
+        }
     }
 }
 
@@ -711,6 +829,17 @@ fn main() {
             ("cropped", |s: &mut State| {
                 develop_scene(s);
                 s.edit.geometry = darkroom_core::Geometry { straighten: 8.0, crop: Some([0.15, 0.1, 0.5, 0.7]), quarter_turns: 1, ..Default::default() };
+            }),
+            // 100% on the chart, which is its own full size.
+            ("zoom", |s: &mut State| {
+                develop_scene(s);
+                s.set_zoom(Zoom::Full);
+            }),
+            // The neutral picker waiting for a click.
+            ("picking", |s: &mut State| {
+                develop_scene(s);
+                s.edit.color.temperature = 70.0;
+                s.toggle_picker(Pick::Neutral);
             }),
             ("hidden", |s: &mut State| {
                 develop_scene(s);
