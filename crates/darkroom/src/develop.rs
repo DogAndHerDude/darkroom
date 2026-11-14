@@ -63,7 +63,7 @@ const DETAIL: [Adjustment; 4] = [
     Adjustment { min: 0.0, ..adj("vignette", "Vignette", |e| e.detail.vignette, |e, v| e.detail.vignette = v) },
 ];
 
-pub fn view(s: &State) -> El {
+pub fn view(s: &State, inset: f32) -> El {
     let (shown, _) = s.view_geometry();
     let mut photo = effect(PHOTO_SLOT).key("photo").aspect_fit(shown[0] / shown[1]);
     if s.cropping {
@@ -138,7 +138,7 @@ pub fn view(s: &State) -> El {
         .child(icon_button("redo", "Redo", redo_icon, s.history.can_redo(), State::redo));
 
     let body = row().w_full().grow(1.0).min_h(0.0).child(left).child(panel);
-    col().w_full().h_full().fill(t::BG_CANVAS).child(top_bar(s, s.photo.name.clone(), history)).child(rule()).child(body)
+    col().w_full().h_full().fill(t::BG_CANVAS).child(top_bar(s, inset, s.photo.name.clone(), history)).child(rule()).child(body)
 }
 
 /// The current folder's photos along the bottom, the open one framed. Click one to open it.

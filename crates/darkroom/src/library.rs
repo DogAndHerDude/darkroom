@@ -13,9 +13,9 @@ use crate::{SIDEBAR_WIDTH, State};
 pub const THUMB_MIN: f32 = 120.0;
 pub const THUMB_MAX: f32 = 240.0;
 
-pub fn view(s: &State) -> El {
+pub fn view(s: &State, inset: f32) -> El {
     let Some(tree) = &s.tree else {
-        return col().w_full().h_full().fill(t::BG_CANVAS).child(top_bar(s, String::new(), spacer())).child(rule()).child(welcome(s));
+        return col().w_full().h_full().fill(t::BG_CANVAS).child(top_bar(s, inset, String::new(), spacer())).child(rule()).child(welcome(s));
     };
 
     // Folders.
@@ -87,7 +87,7 @@ pub fn view(s: &State) -> El {
     let center = col().grow(1.0).shrink().min_w(0.0).h_full().child(toolbar).child(rule()).child(grid);
 
     let body = row().w_full().grow(1.0).min_h(0.0).child(sidebar).child(vrule()).child(center).child(vrule()).child(info(s));
-    col().w_full().h_full().fill(t::BG_CANVAS).child(top_bar(s, String::new(), spacer())).child(rule()).child(body)
+    col().w_full().h_full().fill(t::BG_CANVAS).child(top_bar(s, inset, String::new(), spacer())).child(rule()).child(body)
 }
 
 fn min_rating_label(min: u8) -> String {

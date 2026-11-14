@@ -92,6 +92,7 @@ Everything was built against generated test images and one downloaded X-T4 RAF.
 - The native folder picker (headless runs can't open it), for the library root and the export destination
 - Real Fujifilm JPEGs: EXIF fields, orientation, speed
 - Local tone (Brilliance, Highlights, Shadows) and Definition on any real photo: only a generated backlit scene so far
+- The top bar beside the real traffic lights, and in full screen: checked only against RUNE's headless overlay of where macOS draws them
 - Thumbnail speed on a folder of 26–40 MP files (first visit decodes each one)
 - Noise reduction at full size on a noisy high-ISO photo (the taps are spread apart for export; only seen on ISO 160)
 - Slider drag speed with noise reduction on (81 taps per pixel)

@@ -26,7 +26,7 @@ use darkroom_core::{Channel, Curve, Edit, Flag, History, sidecar};
 use darkroom_render::{Develop, Histogram, Placement, Results};
 use rune::compose::DeviceKey;
 use rune::prefs::Prefs;
-use rune::{AppSpec, Compositor, Cx, El, Frame, Image, ImageCache, Key, KeyEvent, Tx, Waker};
+use rune::{App, AppSpec, Chrome, Compositor, Cx, El, Frame, Image, ImageCache, Key, KeyEvent, Tx, Waker};
 
 use crate::curves::Picker;
 use crate::jobs::{Jobs, Msg, Prepared};
@@ -568,10 +568,12 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     true
 }
 
-fn view(s: &State, _: &mut Cx<State>) -> El {
+fn view(s: &State, cx: &mut Cx<State>) -> El {
+    // Where the traffic lights end; 0 in full screen, where there are none.
+    let inset = cx.titlebar_inset();
     let module = match s.module {
-        Module::Library => library::view(s),
-        Module::Develop => develop::view(s),
+        Module::Library => library::view(s, inset),
+        Module::Develop => develop::view(s, inset),
     };
     rune::el().w_full().h_full().child(module).children(export::dialog(s))
 }
@@ -718,5 +720,10 @@ fn main() {
         ],
         ..AppSpec::new("Darkroom", (1440.0, 900.0), init, view)
     };
-    rune::tooling::run_with(spec, Preview::default());
+    // The traffic lights sit in the top bar, centred in its height and as far from the left.
+    let lights = (ui::TOP_BAR - Chrome::TRAFFIC_LIGHT) / 2.0;
+    App::new(spec)
+        .compositor(Preview::default())
+        .chrome(Chrome { traffic_lights: Some((lights, lights)), ..Chrome::DEFAULT })
+        .run();
 }

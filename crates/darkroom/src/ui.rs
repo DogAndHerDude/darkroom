@@ -118,14 +118,20 @@ pub fn stars(rating: u8, size: f32) -> El {
     (1..=5).fold(row().gap(1.0), |r, i| r.child(star(i <= rating, size)))
 }
 
-/// The top bar: the module switch, a title, and whatever the module puts on the right.
-pub fn top_bar(s: &State, title: String, right: El) -> El {
-    let switch = segmented("module", &[(Module::Library, "Library"), (Module::Develop, "Develop")], s.module, |s, m| s.switch_to(m));
+/// The top bar's height. The window's traffic lights are centred in it (`main`).
+pub const TOP_BAR: f32 = 44.0;
+
+/// The top bar: the module switch, a title, and whatever the module puts on the right. The
+/// window has no titlebar of its own, so macOS draws its traffic lights over the bar's left
+/// end; the switch starts `inset` points in, after them (`Cx::titlebar_inset`).
+pub fn top_bar(s: &State, inset: f32, title: String, right: El) -> El {
+    let switch = segmented("module", &[(Module::Library, "Library"), (Module::Develop, "Develop")], s.module, |s, m| s.switch_to(m)).self_center();
     row()
         .key("top-bar")
         .w_full()
-        .h(44.0)
-        .px(12.0)
+        .h(TOP_BAR)
+        .pl(inset + 12.0)
+        .pr(12.0)
         .gap(12.0)
         .center_y()
         .fill(t::BG_PANEL)
