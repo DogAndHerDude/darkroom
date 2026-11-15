@@ -76,7 +76,10 @@ struct State {
     history: History,
     /// The undo steps of photos opened earlier, kept until the app quits.
     histories: HashMap<PathBuf, History>,
+    /// The preview shows the photo without its edits: the top-bar toggle, or `\` held down.
     show_original: bool,
+    /// The edit taken by "Copy edits", for Paste. Kept until the app quits.
+    copied: Option<Edit>,
     /// The last save's or open's outcome, shown in the panel.
     status: String,
     /// The curve the Curves section shows.
@@ -496,6 +499,7 @@ fn init() -> State {
         history: History::new(&Edit::default()),
         histories: HashMap::new(),
         show_original: false,
+        copied: None,
         status: String::new(),
         curve_channel: Channel::Rgb,
         curve_point: None,
@@ -608,7 +612,8 @@ fn poll(s: &mut State, _t: f64, _tx: &mut Tx) -> bool {
 /// Keyboard shortcuts, as in Lightroom: 0–5 rate, P pick, X reject, U unflag, ← → move between
 /// photos, Return opens the selected photo in Develop, G or Esc goes back to the Library. ⌘Z
 /// undoes and ⇧⌘Z redoes in Develop, where Z switches between the whole photo and 100%, and Esc
-/// first puts down a picker.
+/// first puts down a picker. Also in Develop, ⇧⌘C copies the photo's edits and ⇧⌘V pastes them,
+/// and `\` shows the original while it is held (`key_up` ends it).
 fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     // Typing a slider's value: every key is the field's.
     if s.entry.is_some() {
@@ -616,6 +621,11 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     }
     if ev.is_command('z') && s.module == Module::Develop && s.export_scope.is_none() && s.export_run.is_none() {
         if ev.mods.shift { s.redo() } else { s.undo() }
+        return true;
+    }
+    // As in Photos and Lightroom; plain ⌘C and ⌘V stay with text.
+    if ev.mods.shift && (ev.is_command('c') || ev.is_command('v')) && s.module == Module::Develop && s.export_scope.is_none() && s.export_run.is_none() {
+        if ev.is_command('c') { s.copy_edits() } else { s.paste_edits() }
         return true;
     }
     if ev.mods.cmd || ev.mods.ctrl || ev.mods.alt {
@@ -641,11 +651,21 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
                 ("d", _) => s.switch_to(Module::Develop),
                 ("c", _) if s.module == Module::Develop => s.set_cropping(!s.cropping),
                 ("z", _) if s.module == Module::Develop => s.set_zoom(if s.zoom == Zoom::Fit { Zoom::Full } else { Zoom::Fit }),
+                ("\\", _) if s.module == Module::Develop => s.show_original = true,
                 _ => return false,
             }
         }
         _ => return false,
     }
+    true
+}
+
+/// A key coming up: letting go of `\` brings the edit back.
+fn key_up(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
+    if !matches!(&ev.key, Key::Text(t) if t == "\\") || !s.show_original {
+        return false;
+    }
+    s.show_original = false;
     true
 }
 
@@ -656,7 +676,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         Module::Library => library::view(s, inset),
         Module::Develop => develop::view(s, inset),
     };
-    rune::el().w_full().h_full().child(module).children(export::dialog(s))
+    rune::el().w_full().h_full().on_key_up(key_up).child(module).children(export::dialog(s))
 }
 
 // ---- drawing ----------------------------------------------------------------------------------
@@ -840,6 +860,12 @@ fn main() {
                 develop_scene(s);
                 s.edit.color.temperature = 70.0;
                 s.toggle_picker(Pick::Neutral);
+            }),
+            // An edited photo showing its original: the stage must match `develop`.
+            ("original", |s: &mut State| {
+                develop_scene(s);
+                (s.edit.light.exposure, s.edit.color.saturation) = (1.0, 60.0);
+                s.show_original = true;
             }),
             ("hidden", |s: &mut State| {
                 develop_scene(s);

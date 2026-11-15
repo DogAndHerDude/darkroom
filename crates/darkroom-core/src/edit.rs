@@ -50,6 +50,12 @@ impl Edit {
     pub fn without_adjustments(&self) -> Edit {
         Edit { rating: self.rating, flag: self.flag, ..Edit::default() }
     }
+
+    /// Takes `from`'s Light, Color, Curves and Detail, for pasting one photo's look onto
+    /// another. Crop, rating and flag belong to the photo and stay as they are.
+    pub fn paste_look(&mut self, from: &Edit) {
+        (self.light, self.color, self.curves, self.detail) = (from.light.clone(), from.color.clone(), from.curves.clone(), from.detail.clone());
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,6 +272,21 @@ mod tests {
         c.set_from_pixel(Picker::White, [0.9, 0.95, 0.85]);
         assert!(c.red.eval(0.1) < 1e-5 && c.blue.eval(0.12) < 1e-5);
         assert!((c.green.eval(0.95) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn pasting_a_look_keeps_crop_rating_and_flag() {
+        let mut from = Edit { rating: 5, flag: Flag::Pick, ..Edit::default() };
+        (from.light.exposure, from.color.saturation, from.detail.sharpening, from.curves.enabled) = (0.5, 20.0, 40.0, false);
+        from.curves.red.insert([0.5, 0.6]);
+        from.geometry.straighten = 3.0;
+        let mut to = Edit { rating: 2, flag: Flag::Reject, ..Edit::default() };
+        to.light.contrast = 30.0;
+        to.geometry.crop = Some([0.1, 0.1, 0.5, 0.5]);
+        let before = to.clone();
+        to.paste_look(&from);
+        assert_eq!((&to.light, &to.color, &to.curves, &to.detail), (&from.light, &from.color, &from.curves, &from.detail));
+        assert_eq!((to.rating, to.flag, &to.geometry), (2, Flag::Reject, &before.geometry));
     }
 
     #[test]

@@ -7,7 +7,7 @@ use rune::{Cursor, Drag, El, Key, KeyEvent, Phase, PointerEvent, ScrollSpec, Sur
 
 use crate::curves::Picker;
 use crate::theme as t;
-use crate::ui::{button, divider, eye_icon, eyedropper_icon, icon_button, icon_toggle, redo_icon, rule, segmented, stars, top_bar, undo_icon};
+use crate::ui::{before_after_icon, button, divider, eye_icon, eyedropper_icon, icon_button, icon_toggle, redo_icon, rule, segmented, stars, top_bar, undo_icon};
 use crate::{PHOTO_SLOT, State, crop, curves};
 
 /// Slider track width: the 300 pt panel less its 12 pt padding on each side.
@@ -206,6 +206,21 @@ impl State {
         }
     }
 
+    /// Takes the open photo's edit for a later paste.
+    pub fn copy_edits(&mut self) {
+        self.copied = Some(self.edit.clone());
+        self.status = "Edits copied".into();
+    }
+
+    /// Puts the copied look on the open photo, as one undo step.
+    pub fn paste_edits(&mut self) {
+        let Some(from) = &self.copied else { return };
+        self.edit.paste_look(from);
+        // A selected curve point may not exist on the pasted curves.
+        (self.curve_point, self.curve_removing) = (None, false);
+        self.save();
+    }
+
     /// Starts typing a slider's value.
     fn start_entry(&mut self, a: Adjustment) {
         let shown = readout(a.readout, (a.get)(&self.edit));
@@ -317,11 +332,13 @@ pub fn view(s: &State, inset: f32) -> El {
         .child(spacer())
         .child(stars(e.rating, 12.0));
 
+    let paste = button("paste", "Paste", State::paste_edits);
     let footer = row()
         .w_full()
         .padding(12.0)
         .gap(8.0)
-        .child(button("original", if s.show_original { "Show edit" } else { "Show original" }, |s| s.show_original = !s.show_original))
+        .child(button("copy", "Copy edits", State::copy_edits))
+        .child(if s.copied.is_some() { paste } else { paste.disabled(true).dim(0.45) })
         .child(spacer())
         .child(button("reset", "Reset all", |s| {
             s.edit = s.edit.without_adjustments();
@@ -349,6 +366,7 @@ pub fn view(s: &State, inset: f32) -> El {
         .child(icon_button("undo", "Undo", undo_icon, s.history.can_undo(), State::undo))
         .child(icon_button("redo", "Redo", redo_icon, s.history.can_redo(), State::redo))
         .child(divider())
+        .child(icon_toggle("original", "Before and after", before_after_icon, s.show_original, |s| s.show_original = !s.show_original).help("Hold \\ to see the original"))
         .child(zoom)
         .child(divider());
 

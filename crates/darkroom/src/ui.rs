@@ -95,6 +95,23 @@ pub fn eyedropper_icon(color: Color) -> Shape {
         .view_box(20.0, 20.0)
 }
 
+/// The design's before-and-after mark in a 20 × 20 box: a frame split down the middle.
+pub fn before_after_icon(color: Color) -> Shape {
+    // A 15 × 12 frame with corners of radius 3; 1.66 is the radius times the circle constant 0.5523.
+    let frame = Path::new()
+        .move_to([5.5, 4.0])
+        .line_to([14.5, 4.0])
+        .cubic_to([16.16, 4.0], [17.5, 5.34], [17.5, 7.0])
+        .line_to([17.5, 13.0])
+        .cubic_to([17.5, 14.66], [16.16, 16.0], [14.5, 16.0])
+        .line_to([5.5, 16.0])
+        .cubic_to([3.84, 16.0], [2.5, 14.66], [2.5, 13.0])
+        .line_to([2.5, 7.0])
+        .cubic_to([2.5, 5.34], [3.84, 4.0], [5.5, 4.0])
+        .close();
+    Shape::new().stroke_path(&frame, 1.5, LineCap::Round, color).stroke(vec![[10.0, 2.5], [10.0, 17.5]], 1.5, color).view_box(20.0, 20.0)
+}
+
 /// The design's undo arrow in a 20 × 20 box: an arrowhead at the left of a line that hooks
 /// round and back underneath. `mirror` flips it into redo.
 fn hook_arrow(mirror: bool, color: Color) -> Shape {
