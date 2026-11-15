@@ -1,14 +1,14 @@
 //! The Develop module: the photo, the adjustments panel, and the filmstrip of the current
 //! folder.
 
-use darkroom_core::{Edit, geometry};
+use darkroom_core::{Edit, History, geometry, sidecar};
 use darkroom_render::{fit_aspect, neutral_point, srgb_to_rec2020};
 use rune::{Cursor, Drag, El, Key, KeyEvent, Phase, PointerEvent, ScrollSpec, SurfaceFit, TextEdit, Tx, WheelEvent, canvas, col, effect, el, row, spacer, text, text_input};
 
 use crate::curves::Picker;
 use crate::theme as t;
 use crate::ui::{before_after_icon, button, divider, eye_icon, eyedropper_icon, icon_button, icon_toggle, redo_icon, rule, segmented, stars, top_bar, undo_icon};
-use crate::{PHOTO_SLOT, State, crop, curves};
+use crate::{Module, PHOTO_SLOT, State, crop, curves};
 
 /// Slider track width: the 300 pt panel less its 12 pt padding on each side.
 const TRACK: f32 = 276.0;
@@ -206,10 +206,18 @@ impl State {
         }
     }
 
-    /// Takes the open photo's edit for a later paste.
+    /// Takes a photo's edit for a later paste: the open photo's in Develop, the selection's
+    /// primary's in the Library.
     pub fn copy_edits(&mut self) {
-        self.copied = Some(self.edit.clone());
-        self.status = "Edits copied".into();
+        let from = match (self.module, &self.selected.primary) {
+            (Module::Library, None) => return,
+            (Module::Library, Some(p)) if self.path.as_ref() != Some(p) => sidecar::load(p),
+            _ => Ok(self.edit.clone()),
+        };
+        match from {
+            Ok(edit) => (self.copied, self.status) = (Some(edit), "Edits copied".into()),
+            Err(e) => self.status = format!("Couldn't read the edit file: {e}"),
+        }
     }
 
     /// Puts the copied look on the open photo, as one undo step.
@@ -219,6 +227,38 @@ impl State {
         // A selected curve point may not exist on the pasted curves.
         (self.curve_point, self.curve_removing) = (None, false);
         self.save();
+    }
+
+    /// Puts the copied look on every selected photo, from the Library. Each photo's own undo
+    /// history takes the step, so ⌘Z takes the paste back once that photo is open in Develop.
+    pub fn paste_onto_selected(&mut self) {
+        let Some(from) = self.copied.clone() else { return };
+        for path in self.targets() {
+            if self.path.as_ref() == Some(&path) {
+                self.paste_edits();
+                self.refresh_thumb();
+                continue;
+            }
+            let mut edit = match sidecar::load(&path) {
+                Ok(edit) => edit,
+                Err(e) => {
+                    self.status = format!("Couldn't read the edit file: {e}");
+                    continue;
+                }
+            };
+            let mut history = self.histories.remove(&path).filter(|h| h.is_at(&edit)).unwrap_or_else(|| History::new(&edit));
+            edit.paste_look(&from);
+            if let Err(e) = sidecar::save(&path, &edit) {
+                self.status = format!("Couldn't save: {e}");
+                continue;
+            }
+            history.record(&edit);
+            self.histories.insert(path.clone(), history);
+            if let Some(e) = self.entries.iter_mut().find(|e| e.path == path) {
+                e.edited = edit.has_adjustments();
+            }
+            self.jobs.rethumbnail(path);
+        }
     }
 
     /// Starts typing a slider's value.

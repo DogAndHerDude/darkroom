@@ -194,6 +194,7 @@ pub const TOP_BAR: f32 = 44.0;
 /// end; the switch starts `inset` points in, after them (`Cx::titlebar_inset`).
 pub fn top_bar(s: &State, inset: f32, title: String, right: El) -> El {
     let switch = segmented("module", &[(Module::Library, "Library"), (Module::Develop, "Develop")], s.module, |s, m| s.switch_to(m)).self_center();
+    let several = if s.module == Module::Library { s.selection().len() } else { 0 };
     row()
         .key("top-bar")
         .w_full()
@@ -208,9 +209,10 @@ pub fn top_bar(s: &State, inset: f32, title: String, right: El) -> El {
         .child(text(title).font(t::BODY_STRONG).color(t::INK))
         .child(spacer())
         .child(right)
-        .child(button("export", "Export…", |s| {
-            // The open photo from Develop; the grid from the Library.
-            let one = s.module == Module::Develop && s.target().is_some();
-            s.export_scope = Some(if one { crate::export::Scope::One } else { crate::export::Scope::Shown });
+        .child(button("export", if several > 1 { format!("Export {several} photos") } else { "Export…".to_owned() }, move |s| {
+            // The open photo from Develop; from the Library the selection if it is more than one
+            // photo, and the grid otherwise.
+            let chosen = several > 1 || (s.module == Module::Develop && s.target().is_some());
+            s.export_scope = Some(if chosen { crate::export::Scope::Chosen } else { crate::export::Scope::Shown });
         }))
 }

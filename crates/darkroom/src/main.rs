@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use darkroom_core::library::{Entry, Filter, Folder, Sort};
+use darkroom_core::library::{Entry, Filter, Folder, Selection, Sort};
 use darkroom_core::geometry::{self, Affine};
 use darkroom_core::{Channel, Curve, Edit, Flag, History, sidecar};
 use darkroom_render::{Develop, Histogram, Placement, Results};
@@ -67,7 +67,7 @@ struct State {
     filter: Filter,
     sort: Sort,
     thumb_size: f32,
-    selected: Option<PathBuf>,
+    selected: Selection,
 
     // Develop.
     photo: Arc<Photo>,
@@ -204,7 +204,7 @@ impl State {
     /// The photos an export of `scope` would write.
     fn export_paths(&self, scope: export::Scope) -> Vec<PathBuf> {
         match scope {
-            export::Scope::One => self.target().into_iter().collect(),
+            export::Scope::Chosen => self.targets(),
             export::Scope::Shown => self.visible().into_iter().map(|i| self.entries[i].path.clone()).collect(),
         }
     }
@@ -257,7 +257,13 @@ impl State {
     }
 
     fn selected_entry(&self) -> Option<&Entry> {
-        self.selected.as_deref().and_then(|p| self.entry(p))
+        self.selected.primary.as_deref().and_then(|p| self.entry(p))
+    }
+
+    /// The selected photos the grid shows, in its order. One that a filter hides is left out,
+    /// so nothing is done to a photo that can't be seen.
+    fn selection(&self) -> Vec<PathBuf> {
+        self.visible().into_iter().map(|i| &self.entries[i].path).filter(|p| self.selected.contains(p)).cloned().collect()
     }
 
     /// Makes the last edited photo's thumbnail again. Done on leaving the photo, not on every
@@ -272,7 +278,7 @@ impl State {
         self.refresh_thumb();
         if module == Module::Develop
             && self.path.is_none()
-            && let Some(p) = self.selected.clone()
+            && let Some(p) = self.selected.primary.clone()
         {
             self.open(p);
         }
@@ -299,7 +305,7 @@ impl State {
         self.folder = Some(folder);
         self.entries.clear();
         self.loading_folder = true;
-        self.selected = None;
+        self.selected = Selection::default();
     }
 
     fn undo(&mut self) {
@@ -323,7 +329,7 @@ impl State {
 
     /// Opens a photo in Develop (in the background; the current one stays until it's ready).
     fn open(&mut self, path: PathBuf) {
-        self.selected = Some(path.clone());
+        self.selected = Selection::only(path.clone());
         if self.path.as_ref() == Some(&path) || self.opening.as_ref() == Some(&path) {
             return;
         }
@@ -361,13 +367,21 @@ impl State {
         }
     }
 
-    /// The photo keyboard shortcuts act on: the open one in Develop, the selected one in the
-    /// Library.
+    /// The photo the arrow keys move from: the open one in Develop, the selection's primary in
+    /// the Library.
     fn target(&self) -> Option<PathBuf> {
         match self.module {
             Module::Develop => self.path.clone(),
-            Module::Library => self.selected.clone(),
+            Module::Library => self.selected.primary.clone(),
         }
+    }
+
+    /// The photos a rating, a flag, a paste or an export acts on: the open one in Develop, the
+    /// whole selection in the Library. A primary that the filter hides is still shown in the
+    /// info panel, so when nothing else is selected it is acted on alone.
+    fn targets(&self) -> Vec<PathBuf> {
+        let shown = if self.module == Module::Library { self.selection() } else { Vec::new() };
+        if shown.is_empty() { self.target().into_iter().collect() } else { shown }
     }
 
     /// Moves to the next (`+1`) or previous (`-1`) photo in the grid's order.
@@ -380,7 +394,7 @@ impl State {
         let next = at.map_or(0, |i| (i as isize + by).clamp(0, visible.len() as isize - 1) as usize);
         let path = self.entries[visible[next]].path.clone();
         match self.module {
-            Module::Library => self.selected = Some(path),
+            Module::Library => self.selected = Selection::only(path),
             Module::Develop => self.open(path),
         }
     }
@@ -405,8 +419,8 @@ impl State {
                 self.entries = entries;
                 self.loading_folder = false;
                 let visible = self.visible();
-                if self.selected.is_none() {
-                    self.selected = visible.first().map(|&i| self.entries[i].path.clone());
+                if self.selected.is_empty() {
+                    self.selected = visible.first().map(|&i| Selection::only(self.entries[i].path.clone())).unwrap_or_default();
                 }
                 let wanted: Vec<PathBuf> = visible.iter().map(|&i| self.entries[i].path.clone()).filter(|p| !self.thumbs.contains_key(p)).collect();
                 self.jobs.thumbnails(wanted);
@@ -511,7 +525,7 @@ fn init() -> State {
         filter: Filter::default(),
         sort: Sort::default(),
         thumb_size: 168.0,
-        selected: None,
+        selected: Selection::default(),
         histogram: photo.histogram,
         photo: Arc::new(photo),
         path: None,
@@ -567,18 +581,25 @@ fn init() -> State {
                 s.jobs.scan(folder.to_owned());
                 s.open_folder(folder.to_owned());
             }
-            match Photo::open(&file.to_string_lossy()) {
-                Ok(photo) => {
+            // As `Jobs::open` does: a photo whose edit file can't be read isn't opened, or the
+            // next change would save over that file.
+            let opened = sidecar::load(&file).map_err(|e| format!("its edit file is unreadable: {e}")).and_then(|edit| Ok((Photo::open(&file.to_string_lossy())?, edit)));
+            match opened {
+                Ok((photo, edit)) => {
                     s.histogram = photo.histogram;
                     s.photo = Arc::new(photo);
-                    s.edit = sidecar::load(&file).unwrap_or_default();
+                    s.edit = edit;
                     s.history = History::new(&s.edit);
                     s.status = if s.edit.has_adjustments() { "Edited".into() } else { "Not edited".into() };
-                    s.selected = Some(file.clone());
+                    s.selected = Selection::only(file.clone());
                     s.path = Some(file);
                     s.module = Module::Develop;
                 }
-                Err(e) => s.status = format!("Couldn't open {}: {e}", file.display()),
+                Err(e) => {
+                    s.status = format!("Couldn't open {}: {e}", file.display());
+                    // Still the selected photo, so rating keys don't land on the folder's first.
+                    s.selected = Selection::only(file);
+                }
             }
         }
         None => {
@@ -635,8 +656,9 @@ fn poll(s: &mut State, _t: f64, _tx: &mut Tx) -> bool {
 /// Keyboard shortcuts, as in Lightroom: 0–5 rate, P pick, X reject, U unflag, ← → move between
 /// photos, Return opens the selected photo in Develop, G or Esc goes back to the Library. ⌘Z
 /// undoes and ⇧⌘Z redoes in Develop, where Z switches between the whole photo and 100%, and Esc
-/// first puts down a picker. Also in Develop, ⇧⌘C copies the photo's edits and ⇧⌘V pastes them,
-/// and `\` shows the original while it is held (`key_up` ends it).
+/// first puts down a picker. ⇧⌘C copies the photo's edits and ⇧⌘V pastes them, in the Library
+/// onto every selected photo, which ratings and flags go to as well; ⌘A there selects all the
+/// grid shows. In Develop `\` shows the original while it is held (`key_up` ends it).
 fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     // Typing a slider's value: every key is the field's.
     if s.entry.is_some() {
@@ -647,8 +669,17 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         return true;
     }
     // As in Photos and Lightroom; plain ⌘C and ⌘V stay with text.
-    if ev.mods.shift && (ev.is_command('c') || ev.is_command('v')) && s.module == Module::Develop && s.export_scope.is_none() && s.export_run.is_none() {
-        if ev.is_command('c') { s.copy_edits() } else { s.paste_edits() }
+    if ev.mods.shift && (ev.is_command('c') || ev.is_command('v')) && s.export_scope.is_none() && s.export_run.is_none() {
+        match (ev.is_command('c'), s.module) {
+            (true, _) => s.copy_edits(),
+            (false, Module::Develop) => s.paste_edits(),
+            (false, Module::Library) => s.paste_onto_selected(),
+        }
+        return true;
+    }
+    if ev.is_command('a') && s.module == Module::Library && s.export_scope.is_none() && s.export_run.is_none() {
+        let shown: Vec<PathBuf> = s.visible().into_iter().map(|i| s.entries[i].path.clone()).collect();
+        s.selected.all(&shown);
         return true;
     }
     if ev.mods.cmd || ev.mods.ctrl || ev.mods.alt {
@@ -664,12 +695,12 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         Key::Enter if s.module == Module::Library => s.switch_to(Module::Develop),
         Key::Escape if s.module == Module::Develop => s.switch_to(Module::Library),
         Key::Text(t) => {
-            let target = s.target();
-            match (t.to_lowercase().as_str(), target) {
-                (d @ ("0" | "1" | "2" | "3" | "4" | "5"), Some(p)) => s.set_rating(&p, d.parse().unwrap_or(0)),
-                ("p", Some(p)) => s.set_flag(&p, Flag::Pick),
-                ("x", Some(p)) => s.set_flag(&p, Flag::Reject),
-                ("u", Some(p)) => s.set_flag(&p, Flag::None),
+            let targets = s.targets();
+            match (t.to_lowercase().as_str(), !targets.is_empty()) {
+                (d @ ("0" | "1" | "2" | "3" | "4" | "5"), true) => targets.iter().for_each(|p| s.set_rating(p, d.parse().unwrap_or(0))),
+                ("p", true) => targets.iter().for_each(|p| s.set_flag(p, Flag::Pick)),
+                ("x", true) => targets.iter().for_each(|p| s.set_flag(p, Flag::Reject)),
+                ("u", true) => targets.iter().for_each(|p| s.set_flag(p, Flag::None)),
                 ("g", _) => s.switch_to(Module::Library),
                 ("d", _) => s.switch_to(Module::Develop),
                 ("c", _) if s.module == Module::Develop => s.set_cropping(!s.cropping),

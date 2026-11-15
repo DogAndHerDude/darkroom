@@ -144,6 +144,64 @@ pub fn visible(entries: &[Entry], filter: Filter, sort: Sort) -> Vec<usize> {
     idx
 }
 
+/// The grid's selection: one photo that the info panel shows and Return opens, and any others
+/// selected along with it by ⌘-click, ⇧-click or ⌘A.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Selection {
+    pub primary: Option<PathBuf>,
+    /// The rest of the selection. Never holds `primary`.
+    others: Vec<PathBuf>,
+}
+
+impl Selection {
+    /// `path` alone, as a plain click selects.
+    pub fn only(path: PathBuf) -> Selection {
+        Selection { primary: Some(path), others: Vec::new() }
+    }
+
+    pub fn contains(&self, path: &Path) -> bool {
+        self.primary.as_deref() == Some(path) || self.others.iter().any(|p| p == path)
+    }
+
+    pub fn len(&self) -> usize {
+        self.primary.iter().len() + self.others.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.primary.is_none()
+    }
+
+    /// Adds `path`, which becomes the primary, or takes it out if it was selected (⌘-click).
+    /// Taking out the primary hands that role to the photo added before it.
+    pub fn toggle(&mut self, path: PathBuf) {
+        if self.primary.as_ref() == Some(&path) {
+            self.primary = self.others.pop();
+        } else if let Some(i) = self.others.iter().position(|p| *p == path) {
+            self.others.remove(i);
+        } else {
+            self.others.extend(self.primary.replace(path));
+        }
+    }
+
+    /// Selects everything from the primary to `path` in `order`, the grid's (⇧-click). The
+    /// primary stays, so a second ⇧-click moves the far end instead of growing the range.
+    pub fn extend_to(&mut self, path: PathBuf, order: &[PathBuf]) {
+        let at = |p: &PathBuf| order.iter().position(|o| o == p);
+        let (Some(from), Some(to)) = (self.primary.as_ref().and_then(at), at(&path)) else {
+            *self = Selection::only(path);
+            return;
+        };
+        self.others = order[from.min(to)..=from.max(to)].iter().filter(|p| self.primary.as_ref() != Some(*p)).cloned().collect();
+    }
+
+    /// Selects all of `order`, keeping the primary if it is among them.
+    pub fn all(&mut self, order: &[PathBuf]) {
+        let primary = self.primary.take().filter(|p| order.contains(p)).or_else(|| order.first().cloned());
+        self.others = order.iter().filter(|p| primary.as_ref() != Some(*p)).cloned().collect();
+        self.primary = primary;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +257,60 @@ mod tests {
         assert_eq!(names, [(0, root_name, 0), (1, "2026-10 Alps".into(), 0), (2, "day 2".into(), 1), (1, "2026-11 Lisbon".into(), 1)]);
         assert_eq!(photos_in(&root.join("2026-11 Lisbon")).len(), 1, "edit files aren't photos");
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(PathBuf::from).collect()
+    }
+
+    /// The selected names, sorted, with the primary marked by `*`.
+    fn selected(s: &Selection, order: &[PathBuf]) -> String {
+        let name = |p: &PathBuf| format!("{}{}", p.display(), if s.primary.as_ref() == Some(p) { "*" } else { "" });
+        order.iter().filter(|p| s.contains(p)).map(name).collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn a_command_click_adds_a_photo_or_takes_it_out() {
+        let order = paths(&["a", "b", "c", "d"]);
+        let mut s = Selection::only("a".into());
+        s.toggle("c".into());
+        s.toggle("d".into());
+        assert_eq!((selected(&s, &order).as_str(), s.len()), ("a c d*", 3));
+        s.toggle("a".into());
+        assert_eq!(selected(&s, &order), "c d*");
+        s.toggle("d".into());
+        assert_eq!(selected(&s, &order), "c*", "the photo added before takes over");
+        s.toggle("c".into());
+        assert!(s.is_empty() && s.len() == 0);
+    }
+
+    #[test]
+    fn a_shift_click_selects_the_range_from_the_primary_either_way() {
+        let order = paths(&["a", "b", "c", "d", "e"]);
+        let mut s = Selection::only("c".into());
+        s.extend_to("e".into(), &order);
+        assert_eq!(selected(&s, &order), "c* d e");
+        s.extend_to("a".into(), &order);
+        assert_eq!(selected(&s, &order), "a b c*", "the range is replaced, not grown");
+        s.extend_to("gone".into(), &order);
+        assert_eq!(selected(&s, &order), "", "a photo the grid doesn't show is selected alone");
+        assert_eq!(s.primary, Some("gone".into()));
+        let mut none = Selection::default();
+        none.extend_to("b".into(), &order);
+        assert_eq!(selected(&none, &order), "b*");
+    }
+
+    #[test]
+    fn select_all_keeps_the_primary_it_can() {
+        let order = paths(&["a", "b", "c"]);
+        let mut s = Selection::only("b".into());
+        s.all(&order);
+        assert_eq!(selected(&s, &order), "a b* c");
+        let mut hidden = Selection::only("z".into());
+        hidden.all(&order);
+        assert_eq!((selected(&hidden, &order).as_str(), hidden.len()), ("a* b c", 3));
+        let mut empty = Selection::only("z".into());
+        empty.all(&[]);
+        assert!(empty.is_empty());
     }
 }

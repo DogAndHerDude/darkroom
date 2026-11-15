@@ -86,8 +86,8 @@ const SIZES: [(Option<u32>, &str); 4] = [(None, "Full"), (Some(4000), "4000"), (
 /// Which photos the dialog will export.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
-    /// The open photo (Develop) or the selected one (Library).
-    One,
+    /// The open photo (Develop) or the selected ones (Library).
+    Chosen,
     /// Every photo the grid shows, after filters.
     Shown,
 }
@@ -280,11 +280,12 @@ fn settings_view(s: &State, scope: Scope) -> El {
     let title = if count == 1 { "Export 1 photo".to_owned() } else { format!("Export {count} photos") };
     let destination = x.destination_for(s.folder.as_deref());
     let mut body = col().w_full().gap(14.0);
-    // Offered when there is both an open or selected photo and more than it in the grid.
-    let (one, shown) = (s.export_paths(Scope::One).len(), s.export_paths(Scope::Shown).len());
-    if one == 1 && shown > 1 {
+    // Offered when there is both an open photo or a selection and more than it in the grid.
+    let (chosen, shown) = (s.export_paths(Scope::Chosen).len(), s.export_paths(Scope::Shown).len());
+    if chosen > 0 && shown > chosen {
+        let these = if chosen == 1 { "This photo" } else { "Selected" };
         let all = if s.filter == Default::default() { "All in folder" } else { "All shown" };
-        body = body.child(field("Photos", segmented("scope", &[(Scope::One, "This photo"), (Scope::Shown, all)], scope, |s, v| s.export_scope = Some(v))));
+        body = body.child(field("Photos", segmented("scope", &[(Scope::Chosen, these), (Scope::Shown, all)], scope, |s, v| s.export_scope = Some(v))));
     }
     body = body
         .child(field("Format", segmented("format", &[(Format::Jpeg, "JPEG"), (Format::Png, "PNG"), (Format::Tiff, "TIFF")], x.format, |s, f| s.export_settings.format = f)));

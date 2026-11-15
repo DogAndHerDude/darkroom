@@ -197,4 +197,4 @@ The user tests the native folder picker and their own camera files by hand; head
 - At 100% a second, full-size `Develop` lives in the compositor (`Preview.full`); its memory and slider speed are unmeasured.
 - An edited photo's thumbnail is made again only when the photo is left, and a pipeline change doesn't refresh thumbnails already cached (delete `~/Library/Caches/darkroom/thumbs/*.edit.*`).
 - The RAF starting look is a base tone fitted to one X-T4 sample, with no film simulation.
-- No presets, before/after split, or multi-select yet; paste takes all sections, one photo at a time.
+- No presets or before/after split yet; paste takes all sections. The Library has no status line, so a failure there shows only in Develop's panel.

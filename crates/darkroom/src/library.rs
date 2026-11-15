@@ -1,9 +1,12 @@
 //! The Library module: folders on the left, the current folder's photos in a grid, and the
-//! selected photo's details on the right. With no folder chosen yet, the first-launch screen.
+//! selected photo's details on the right. Several photos can be selected; ratings, flags, paste
+//! and export then act on all of them, and the details show the one clicked last. With no folder chosen yet, the first-launch screen.
 
 use darkroom_core::Flag;
-use darkroom_core::library::{Entry, Show, Sort};
-use rune::{Color, Drag, El, FileDialogOptions, Phase, ScrollSpec, SurfaceFit, Tx, col, el, row, spacer, text};
+use std::path::PathBuf;
+
+use darkroom_core::library::{Entry, Selection, Show, Sort};
+use rune::{Color, Drag, El, FileDialogOptions, Mods, Phase, ScrollSpec, SurfaceFit, Tx, col, el, row, spacer, text};
 
 use crate::theme as t;
 use crate::ui::{button, primary, rule, segmented, star, stars, top_bar, vrule};
@@ -62,6 +65,8 @@ pub fn view(s: &State, inset: f32) -> El {
         (_, v, all) if v == all => format!("{all} photos"),
         (_, v, all) => format!("{v} of {all} photos"),
     };
+    let several = s.selection().len();
+    let count = if several > 1 { format!("{count} · {several} selected") } else { count };
     let toolbar = row()
         .w_full()
         .px(16.0)
@@ -94,17 +99,32 @@ fn min_rating_label(min: u8) -> String {
     if min == 0 { "Any rating".into() } else { format!("{}+ stars", min) }
 }
 
-/// One photo in the grid: thumbnail, name, flag and stars. Click selects; double-click opens it
-/// in Develop.
+impl State {
+    /// A click on a grid cell selects it alone; with ⌘ it adds the photo or takes it out, with
+    /// ⇧ it selects the range from the primary.
+    fn click_cell(&mut self, path: PathBuf, mods: Mods) {
+        if mods.cmd {
+            self.selected.toggle(path);
+        } else if mods.shift {
+            let shown: Vec<PathBuf> = self.visible().into_iter().map(|i| self.entries[i].path.clone()).collect();
+            self.selected.extend_to(path, &shown);
+        } else {
+            self.selected = Selection::only(path);
+        }
+    }
+}
+
+/// One photo in the grid: thumbnail, name, flag and stars. Click selects (⌘ and ⇧ for several);
+/// double-click opens it in Develop.
 fn cell(s: &State, e: &Entry) -> El {
     let size = s.thumb_size;
-    let selected = s.selected.as_ref() == Some(&e.path);
+    let selected = s.selected.contains(&e.path);
     let mut image = el().w(size - 8.0).h((size - 8.0) * 2.0 / 3.0).radius(4.0).fill(t::BG_PANEL);
     if let Some(img) = s.thumbs.get(&e.path) {
         image = image.pixels_fit(img.pixels(), SurfaceFit::Fit).fill(Color::TRANSPARENT);
     }
     if selected {
-        image = image.border(2.0, t::ACCENT);
+        image = image.outline(2.0, 2.0, t::ACCENT);
     }
     let flag = match e.flag {
         Flag::Pick => Some(text("Pick").font(t::CAPTION).color(t::INK)),
@@ -123,7 +143,7 @@ fn cell(s: &State, e: &Entry) -> El {
         .radius(6.0)
         .hover(t::BG_PANEL)
         .opacity(if e.flag == Flag::Reject { 0.5 } else { 1.0 })
-        .on_press(move |s: &mut State| s.selected = Some(select.clone()))
+        .on_press_tx(move |s: &mut State, tx: &mut Tx| s.click_cell(select.clone(), tx.mods()))
         .on_double_press(move |s: &mut State| {
             s.open(open.clone());
             s.module = crate::Module::Develop;
@@ -142,7 +162,8 @@ fn cell(s: &State, e: &Entry) -> El {
         )
 }
 
-/// The selected photo's details, rating and flag.
+/// The primary selected photo's details, with the rating and flag, which set every selected
+/// photo's.
 fn info(s: &State) -> El {
     let panel = col().key("info").w(300.0).h_full().min_h(0.0).fill(t::BG_PANEL).padding(12.0).gap(16.0);
     let Some(e) = s.selected_entry() else {
@@ -154,7 +175,7 @@ fn info(s: &State) -> El {
     }
     let mut rating = row().gap(2.0);
     for n in 1..=5u8 {
-        let path = e.path.clone();
+        let current = e.rating;
         rating = rating.child(
             el().key(format!("rate-{n}"))
                 .role("button")
@@ -163,15 +184,11 @@ fn info(s: &State) -> El {
                 .radius(5.0)
                 .hover(t::BG_HOVER)
                 // Clicking the current rating clears it.
-                .on_press(move |s: &mut State| {
-                    let current = s.entry(&path).map_or(0, |e| e.rating);
-                    s.set_rating(&path, if current == n { 0 } else { n });
-                })
+                .on_press(move |s: &mut State| s.targets().iter().for_each(|p| s.set_rating(p, if current == n { 0 } else { n })))
                 .child(star(n <= e.rating, 16.0)),
         );
     }
     let flag_button = |key: &'static str, label: &'static str, flag: Flag, on: bool| {
-        let path = e.path.clone();
         el().key(key)
             .role("button")
             .label(label)
@@ -182,7 +199,7 @@ fn info(s: &State) -> El {
             .radius(7.0)
             .fill(if on { t::ACCENT_SOFT } else { Color::TRANSPARENT })
             .hover(if on { t::ACCENT_SOFT } else { t::BG_HOVER })
-            .on_press(move |s: &mut State| s.set_flag(&path, if on { Flag::None } else { flag }))
+            .on_press(move |s: &mut State| s.targets().iter().for_each(|p| s.set_flag(p, if on { Flag::None } else { flag })))
             .child(text(label).font(t::BODY).color(if on { t::ACCENT_INK } else { t::INK_MUTED }))
     };
     let flags = row()

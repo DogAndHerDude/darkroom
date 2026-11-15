@@ -30,17 +30,18 @@ Phase: **implementation.** Every v1 area has a working first version. What follo
 | Sliders | Drag; double-click the track or the label to reset; click the value to type one (Return or a click elsewhere sets it, Esc cancels) |
 | Sections | The eye icon hides or shows a section's edits; Reset all |
 | Before/after | The original while `\` is held, or toggled with the top-bar button |
-| Copy/paste edits | "Copy edits" and "Paste" under the panel, or ⇧⌘C and ⇧⌘V, in Develop. Paste replaces Light, Color, Curves and Detail and keeps the photo's own crop, rating and flag; one undo step |
+| Copy/paste edits | "Copy edits" and "Paste" under the panel in Develop, or ⇧⌘C and ⇧⌘V there and in the Library, where paste goes onto every selected photo. Paste replaces Light, Color, Curves and Detail and keeps each photo's own crop, rating and flag; one undo step a photo |
 | Undo/redo | ⌘Z and ⇧⌘Z, or the arrows in the top bar, in Develop. One step per finished change (a slider drag, a curve point, a crop, a reset); each photo keeps its steps until the app quits |
 | Histogram | Live from the GPU, at the top of the panel, with the photo's aperture, shutter, ISO and focal length under it |
 | Clipping warnings | The histogram's two squares paint crushed shadows blue and blown highlights red over the photo. Preview only; exports never carry them |
 | Edited thumbnails | The grid, the info panel and the filmstrip show an edited photo as edited, crop included; made again when you leave the photo |
 | Crop | Aspect presets (Free, Original, 1:1, 4:5, 16:9), straighten ±45°, rotate 90°, flip; applied in preview and export |
 | Library | Folder tree, thumbnail grid with disk cache, show All/Picks/Rejects, minimum rating, sort by time or name, thumbnail size, info panel with EXIF |
+| Multi-select | In the grid: ⌘-click adds a photo or takes it out, ⇧-click selects the range from the photo clicked before, ⌘A selects all shown. Ratings, flags, paste and export act on the whole selection; the info panel shows the photo clicked last |
 | Ratings and flags | In the Library and Develop, by click or key |
 | Filmstrip | In Develop, with ← → |
 | First launch | Choose a root folder; remembered |
-| Export | JPEG, PNG, 16-bit TIFF; long-edge resize; sRGB or Display P3 with ICC profile; camera info without location; one photo or everything shown; progress and failures listed |
+| Export | JPEG, PNG, 16-bit TIFF; long-edge resize; sRGB or Display P3 with ICC profile; camera info without location; one photo, the Library's selection, or everything shown; progress and failures listed |
 | RAF | Developed with `rawler` to linear floats; thumbnails and EXIF from the embedded JPEG |
 
 ### Not built
@@ -53,7 +54,6 @@ In the spec or the designs, with no code yet.
 | Presets | ✗ | |
 | Before/after split view | ✗ | The held key and the toggle are built |
 | Fuji film simulation in the info panel | ✅ | Needs Fujifilm MakerNote parsing |
-| Multi-select in the grid | ✗ | Export is one photo or all shown, nothing between |
 | Folder watching | n/a | New photos appear after reopening the folder |
 | Missing folder or drive, unreadable file | ✗ | Failures show as a line of status text only |
 | Export file naming | ✅ | Files keep the photo's name; no template |
@@ -80,13 +80,15 @@ Design column: ✅ designed on the canvas · ◐ partly · ✗ not designed · n
 - **RAF + JPEG pairs** show as two separate photos.
 - **Undo history:** lost on quit, and capped at 200 steps a photo. Rating and flag changes aren't steps. The top-bar arrows have no tooltip and their icons don't brighten on hover as the design's do.
 - **Before/after drops the crop too:** the original shows whole and unrotated, so a cropped photo jumps in size instead of comparing like with like.
-- **Copied edits live in the app only:** not on the system clipboard, gone on quit. Paste works on the photo open in Develop, one at a time; there is no paste from the Library or onto several photos.
+- **Copied edits live in the app only:** not on the system clipboard, gone on quit. In the Library, copy and paste are shortcuts only (no button), and a paste there can only be undone photo by photo, with ⌘Z after opening each one in Develop, and only until the app quits.
+- **Multi-select is clicks and ⌘A only:** no ⇧-arrow to extend, no drag to select, no key to drop the selection (click a photo). A selected photo that a filter hides stays selected but is left alone by ratings, flags, paste and export, and comes back selected when the filter is lifted. The filmstrip in Develop doesn't show or use the selection.
+- **The Library shows no status line:** a rating, flag or paste that fails there (an unreadable edit file) says so only in Develop's panel, and nothing in the Library confirms a paste except the thumbnails changing. The same goes for a photo the Library refuses to open. An edit file's parse error is several lines long and runs out of the panel's one-line status.
+- **Ratings, flags and paste on many photos run in the click or key handler:** each photo's edit file is read and written there, one after another. Untimed beyond six photos.
 - **Clipping warnings are a rule of thumb:** highlights warn when any channel shows at 255, shadows only when all three show at 0. A fully saturated colour therefore warns as a highlight (the test chart's hue bars do). The test reads the pixel as drawn, so at Fit a clipped speck smaller than a screen pixel can go unmarked. There is no shortcut key and no count of clipped pixels.
 - **Edited thumbnails lag the edit:** a thumbnail is made again when you open another photo or leave Develop, not while you edit, and each time decodes the whole file (a RAF is developed again, a few seconds). A change to the pipeline's code doesn't refresh thumbnails already cached. A photo edited and then reset leaves its old edited thumbnail in the cache, unused.
 - **Verbose edit files:** reading is sparse (missing fields are neutral), but saving writes every field, so a rating alone produces a full file.
 - **Preview is 8-bit sRGB:** RUNE has no known path for high-bit-depth or P3 output of app-supplied images. Processing is float and exports are unaffected.
 - **TIFF exports carry no camera info.**
-- **A broken edit file is ignored when a photo is opened from the command line** (`darkroom photo.jpg`): the photo opens unedited, and the next change overwrites the file. Opening from the Library refuses instead.
 
 ### Not yet tried on real files
 
@@ -101,6 +103,7 @@ Everything was built against generated test images and one downloaded X-T4 RAF.
 - The top bar beside the real traffic lights, and in full screen: checked only against RUNE's headless overlay of where macOS draws them
 - Edited thumbnails of a RAF, and of a folder with many edited photos (each is decoded in full first): three generated PNGs so far. The filmstrip's refresh after moving to the next photo wasn't looked at on its own
 - Clipping warnings on a real photo and at 100%: the test chart at Fit only
+- ⌘-click, ⇧-click and ⌘A from a real mouse and keyboard: scripted clicks with held modifiers only, on six generated PNGs
 - Thumbnail speed on a folder of 26–40 MP files (first visit decodes each one)
 - Noise reduction at full size on a noisy high-ISO photo (the taps are spread apart for export; only seen on ISO 160)
 - Slider drag speed with noise reduction on (81 taps per pixel)
@@ -223,15 +226,16 @@ How it runs: one photo at a time. A background thread decodes the full image and
 
   | Key | Does |
   | --- | --- |
-  | 0–5 | Rate the photo |
-  | P / X / U | Pick / reject / unflag |
+  | 0–5 | Rate the photo (in the Library, every selected photo) |
+  | P / X / U | Pick / reject / unflag (likewise) |
   | ← → | Previous / next photo |
   | Return | Open the selected photo in Develop |
   | G or Esc | Back to the Library |
   | D | Develop |
   | C | Crop tool on and off (Develop) |
   | ⌘Z / ⇧⌘Z | Undo / redo (Develop) |
-  | ⇧⌘C / ⇧⌘V | Copy / paste edits (Develop) |
+  | ⇧⌘C / ⇧⌘V | Copy / paste edits (in the Library, paste goes onto every selected photo) |
+  | ⌘-click / ⇧-click / ⌘A | Add or take out a photo / select a range / select all shown (Library) |
   | `\` held | Show the original (Develop) |
   | Z | Fit / 100% (Develop) |
   | Return or Esc | Leave the crop tool; Esc also closes the export dialog |
@@ -260,6 +264,8 @@ So the preview never leaves the GPU, and processing stays in float until the fin
 - Before/after split view
 - The before/after button while the original shows (built as the accent-lit toggle)
 - Paste with nothing copied (built as a dimmed Paste button)
+- The info panel with several photos selected (built showing the photo clicked last), and copy and paste in the Library (shortcuts only)
+- The export dialog's "Selected" option (built into the existing Photos control)
 - Clipping overlay on the photo (built as flat `clip-shadow` and `clip-highlight` over the clipped pixels)
 - Presets: list, save, apply
 - Paste edits with a choice of sections
