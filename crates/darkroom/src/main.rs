@@ -30,7 +30,7 @@ use rune::{App, AppSpec, Chrome, Compositor, Cx, El, Frame, Image, ImageCache, K
 
 use crate::curves::Picker;
 use crate::develop::{Adjustment, Pick, Zoom};
-use crate::jobs::{Full, Jobs, Msg, Prepared};
+use crate::jobs::{Full, Jobs, Msg, Prepared, ThumbStore};
 use crate::photo::Photo;
 
 /// The effect slot the photo is drawn into.
@@ -60,6 +60,10 @@ struct State {
     loading_folder: bool,
     entries: Vec<Entry>,
     thumbs: HashMap<PathBuf, Image>,
+    /// Edited photos decoded for their thumbnails, waiting for the compositor to develop them.
+    thumb_gpu: Vec<(Box<Prepared>, Option<ThumbStore>)>,
+    /// A photo whose edit was saved since its thumbnail was made.
+    thumb_stale: Option<PathBuf>,
     filter: Filter,
     sort: Sort,
     thumb_size: f32,
@@ -121,6 +125,9 @@ struct State {
     /// The slider whose value is being typed, and the field it is typed in.
     entry: Option<Adjustment>,
     entry_text: TextEdit,
+    /// The clipping warnings painted over the photo, switched by the histogram's two squares.
+    clip_shadows: bool,
+    clip_highlights: bool,
     /// The edited photo's histogram, live from the GPU (the original's until the first arrives).
     histogram: Histogram,
     /// Where the GPU leaves results for `poll` to pick up.
@@ -154,6 +161,7 @@ impl State {
             Ok(()) => "Not edited".into(),
             Err(e) => format!("Couldn't save: {e}"),
         };
+        self.thumb_stale = Some(path.clone());
         let (rating, flag, edited) = (self.edit.rating, self.edit.flag, self.edit.has_adjustments());
         if let Some(e) = self.entries.iter_mut().find(|e| e.path == path) {
             (e.rating, e.flag, e.edited) = (rating, flag, edited);
@@ -252,7 +260,16 @@ impl State {
         self.selected.as_deref().and_then(|p| self.entry(p))
     }
 
+    /// Makes the last edited photo's thumbnail again. Done on leaving the photo, not on every
+    /// save, as each one decodes the file.
+    fn refresh_thumb(&mut self) {
+        if let Some(path) = self.thumb_stale.take() {
+            self.jobs.rethumbnail(path);
+        }
+    }
+
     fn switch_to(&mut self, module: Module) {
+        self.refresh_thumb();
         if module == Module::Develop
             && self.path.is_none()
             && let Some(p) = self.selected.clone()
@@ -394,6 +411,7 @@ impl State {
                 let wanted: Vec<PathBuf> = visible.iter().map(|&i| self.entries[i].path.clone()).filter(|p| !self.thumbs.contains_key(p)).collect();
                 self.jobs.thumbnails(wanted);
             }
+            Msg::ThumbRender { prepared, store } => self.thumb_gpu.push((prepared, store)),
             Msg::Thumb { path, width, height, rgba } => {
                 if let Some(images) = &self.images {
                     self.thumbs.insert(path, images.rgba(width, height, rgba));
@@ -443,6 +461,7 @@ impl State {
                 match result {
                     Ok(opened) => {
                         let (photo, edit) = *opened;
+                        self.refresh_thumb();
                         self.histogram = photo.histogram;
                         self.photo = Arc::new(photo);
                         self.status = if edit.has_adjustments() { "Edited".into() } else { "Not edited".into() };
@@ -487,6 +506,8 @@ fn init() -> State {
         loading_folder: false,
         entries: Vec::new(),
         thumbs: HashMap::new(),
+        thumb_gpu: Vec::new(),
+        thumb_stale: None,
         filter: Filter::default(),
         sort: Sort::default(),
         thumb_size: 168.0,
@@ -523,6 +544,8 @@ fn init() -> State {
         full_loading: None,
         entry: None,
         entry_text: TextEdit::new(""),
+        clip_shadows: false,
+        clip_highlights: false,
         results: Arc::new(Results::default()),
         waker: None,
         export_settings: export::Settings::default(),
@@ -639,7 +662,7 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         Key::Enter | Key::Escape if s.cropping => s.set_cropping(false),
         Key::Escape if s.picker.is_some() && s.module == Module::Develop => s.picker = None,
         Key::Enter if s.module == Module::Library => s.switch_to(Module::Develop),
-        Key::Escape if s.module == Module::Develop => s.module = Module::Library,
+        Key::Escape if s.module == Module::Develop => s.switch_to(Module::Library),
         Key::Text(t) => {
             let target = s.target();
             match (t.to_lowercase().as_str(), target) {
@@ -647,7 +670,7 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
                 ("p", Some(p)) => s.set_flag(&p, Flag::Pick),
                 ("x", Some(p)) => s.set_flag(&p, Flag::Reject),
                 ("u", Some(p)) => s.set_flag(&p, Flag::None),
-                ("g", _) => s.module = Module::Library,
+                ("g", _) => s.switch_to(Module::Library),
                 ("d", _) => s.switch_to(Module::Develop),
                 ("c", _) if s.module == Module::Develop => s.set_cropping(!s.cropping),
                 ("z", _) if s.module == Module::Develop => s.set_zoom(if s.zoom == Zoom::Fit { Zoom::Full } else { Zoom::Fit }),
@@ -689,7 +712,12 @@ struct Preview {
     /// The open photo developed at full size, for 100%: made when its pixels arrive and kept
     /// while that photo stays open.
     full: Option<Develop>,
+    /// Develops edited photos' thumbnails, one after another.
+    thumbs: Option<Develop>,
 }
+
+/// Edited thumbnails developed in one frame; the rest wait for the next.
+const THUMBS_PER_FRAME: usize = 4;
 
 impl Compositor<State> for Preview {
     fn render(&mut self, f: &mut Frame<'_, State>) {
@@ -699,7 +727,7 @@ impl Compositor<State> for Preview {
             let wake = s.waker.clone().unwrap_or_else(|| Arc::new(|| {}));
             self.gpu = Some((key, Develop::new(f.device, s.results.clone(), wake)));
             // The full-size copy lived on the old device; its pixels are decoded again.
-            self.full = None;
+            (self.full, self.thumbs) = (None, None);
             f.rt.state.full = None;
             f.rt.state.ensure_full();
         }
@@ -727,6 +755,32 @@ impl Compositor<State> for Preview {
                     deliver.send(Msg::Exported { run, index, result });
                 });
             }
+        }
+
+        // Edited thumbnails go the same way as an export, at thumbnail size.
+        let s = &mut f.rt.state;
+        let take = s.thumb_gpu.len().min(THUMBS_PER_FRAME);
+        for (prepared, store) in s.thumb_gpu.drain(..take) {
+            let gpu = self.thumbs.get_or_insert_with(|| {
+                let mut gpu = Develop::new(f.device, Arc::new(Results::default()), Arc::new(|| {}));
+                gpu.histogram_enabled = false;
+                gpu
+            });
+            gpu.detail_scale = prepared.detail_scale;
+            gpu.set_photo(f.device, f.queue, 0, prepared.size, prepared.pixels.source());
+            gpu.update(f.device, f.queue, &prepared.edit);
+            let g = &prepared.edit.geometry;
+            let (deliver, path) = (s.jobs.deliverer(), prepared.path.clone());
+            gpu.export(f.device, f.queue, g.output_to_source(prepared.size), g.output_size(prepared.size), move |rendered| {
+                if let Ok(image) = rendered {
+                    deliver.send(jobs::thumb_rendered(path, &image, store));
+                }
+            });
+        }
+        if !s.thumb_gpu.is_empty()
+            && let Some(wake) = &s.waker
+        {
+            wake();
         }
 
         let s = &mut f.rt.state;
@@ -779,7 +833,17 @@ impl Compositor<State> for Preview {
             shown.draw(
                 queue,
                 pass,
-                Placement { rect, target: site.size, format: site.format, encode_srgb: site.srgb_blend, output, map, background: [c.r, c.g, c.b] },
+                Placement {
+                    rect,
+                    target: site.size,
+                    format: site.format,
+                    encode_srgb: site.srgb_blend,
+                    output,
+                    map,
+                    background: [c.r, c.g, c.b],
+                    clip_shadow: state.clip_shadows.then_some(theme::CLIP_SHADOW).map(|c| [c.r, c.g, c.b]),
+                    clip_highlight: state.clip_highlights.then_some(theme::CLIP_HIGHLIGHT).map(|c| [c.r, c.g, c.b]),
+                },
             );
         });
         // For the handlers that turn a point on the slot into a place on the photo.
@@ -860,6 +924,12 @@ fn main() {
                 develop_scene(s);
                 s.edit.color.temperature = 70.0;
                 s.toggle_picker(Pick::Neutral);
+            }),
+            // Both clipping warnings on a photo pushed past both ends.
+            ("clipping", |s: &mut State| {
+                develop_scene(s);
+                (s.edit.light.exposure, s.edit.light.contrast, s.edit.light.black_point) = (1.0, 60.0, 40.0);
+                (s.clip_shadows, s.clip_highlights) = (true, true);
             }),
             // An edited photo showing its original: the stage must match `develop`.
             ("original", |s: &mut State| {

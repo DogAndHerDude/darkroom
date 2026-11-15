@@ -13,7 +13,14 @@ struct Present {
     map_ef: vec4<f32>,
     // Linear RGB shown where the map leaves the photo (a straightened photo's corners).
     background: vec4<f32>,
+    // The clipping warnings: linear RGB, and a above 0.5 when the warning is on.
+    clip_shadow: vec4<f32>,
+    clip_highlight: vec4<f32>,
 }
+
+// Linear values that encode to 0 and to 255 in 8 bits: the histogram's end bins.
+const CLIP_LOW: f32 = 0.000152;
+const CLIP_HIGH: f32 = 0.995545;
 
 @group(0) @binding(0) var photo: texture_2d<f32>;
 @group(0) @binding(1) var smp: sampler;
@@ -46,7 +53,16 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // Sampled outside the branch: textureSample needs uniform control flow.
     let sampled = clamp(textureSample(photo, smp, clamp(src, vec2<f32>(0.0), vec2<f32>(1.0))).rgb, vec3<f32>(0.0), vec3<f32>(1.0));
     let off = any(src < vec2<f32>(-0.0005)) || any(src > vec2<f32>(1.0005));
-    var c = select(sampled, u.background.rgb, off);
+    var c = sampled;
+    // Highlights warn when any channel is at full, shadows only when all three are at zero:
+    // a saturated colour has a channel at zero without being crushed.
+    if u.clip_highlight.a > 0.5 && any(sampled >= vec3<f32>(CLIP_HIGH)) {
+        c = u.clip_highlight.rgb;
+    }
+    if u.clip_shadow.a > 0.5 && all(sampled < vec3<f32>(CLIP_LOW)) {
+        c = u.clip_shadow.rgb;
+    }
+    c = select(c, u.background.rgb, off);
     if u.encode.x > 0.5 {
         c = srgb_encode(c);
     }

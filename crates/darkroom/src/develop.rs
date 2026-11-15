@@ -345,7 +345,7 @@ pub fn view(s: &State, inset: f32) -> El {
             s.save();
         }));
 
-    let histogram = col().w_full().px(12.0).pb(12.0).child(curves::histogram_panel(&s.histogram, &s.photo.exif.exposure_line()));
+    let histogram = col().w_full().px(12.0).pb(12.0).child(curves::histogram_panel(s));
     let panel = col()
         .key("panel")
         .w(300.0)

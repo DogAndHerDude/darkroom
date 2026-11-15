@@ -51,6 +51,11 @@ pub const CHAN_BLUE: Color = Color { r: 0.114435, g: 0.274677, b: 0.745404, a: 1
 /// `chan-luma` #cfc8bd
 pub const CHAN_LUMA: Color = Color { r: 0.623960, g: 0.577580, b: 0.508881, a: 1.0 };
 
+/// `clip-highlight` #ff3b4e
+pub const CLIP_HIGHLIGHT: Color = Color { r: 1.000000, g: 0.043735, b: 0.076185, a: 1.0 };
+/// `clip-shadow` #3d7bff
+pub const CLIP_SHADOW: Color = Color { r: 0.046665, g: 0.198069, b: 1.000000, a: 1.0 };
+
 /// `accent-soft` #3c2b20
 pub const ACCENT_SOFT: Color = Color { r: 0.045186, g: 0.024158, b: 0.014444, a: 1.0 };
 /// `accent-ink` #ecb38f

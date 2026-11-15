@@ -33,6 +33,8 @@ Phase: **implementation.** Every v1 area has a working first version. What follo
 | Copy/paste edits | "Copy edits" and "Paste" under the panel, or ⇧⌘C and ⇧⌘V, in Develop. Paste replaces Light, Color, Curves and Detail and keeps the photo's own crop, rating and flag; one undo step |
 | Undo/redo | ⌘Z and ⇧⌘Z, or the arrows in the top bar, in Develop. One step per finished change (a slider drag, a curve point, a crop, a reset); each photo keeps its steps until the app quits |
 | Histogram | Live from the GPU, at the top of the panel, with the photo's aperture, shutter, ISO and focal length under it |
+| Clipping warnings | The histogram's two squares paint crushed shadows blue and blown highlights red over the photo. Preview only; exports never carry them |
+| Edited thumbnails | The grid, the info panel and the filmstrip show an edited photo as edited, crop included; made again when you leave the photo |
 | Crop | Aspect presets (Free, Original, 1:1, 4:5, 16:9), straighten ±45°, rotate 90°, flip; applied in preview and export |
 | Library | Folder tree, thumbnail grid with disk cache, show All/Picks/Rejects, minimum rating, sort by time or name, thumbnail size, info panel with EXIF |
 | Ratings and flags | In the Library and Develop, by click or key |
@@ -50,9 +52,7 @@ In the spec or the designs, with no code yet.
 | Paste with a choice of sections | ✗ | Paste always takes all four sections |
 | Presets | ✗ | |
 | Before/after split view | ✗ | The held key and the toggle are built |
-| Histogram clipping toggles and overlay on the photo | ◐ overlay not drawn | |
 | Fuji film simulation in the info panel | ✅ | Needs Fujifilm MakerNote parsing |
-| Edited thumbnails | n/a | The grid shows the original (the camera's JPEG for a RAF) |
 | Multi-select in the grid | ✗ | Export is one photo or all shown, nothing between |
 | Folder watching | n/a | New photos appear after reopening the folder |
 | Missing folder or drive, unreadable file | ✗ | Failures show as a line of status text only |
@@ -69,7 +69,7 @@ Design column: ✅ designed on the canvas · ◐ partly · ✗ not designed · n
 - **Out-of-gamut colour:** the hard step in saturated blues is gone (largest neighbour step on a generated blue chart went from 38 levels to 3 or less at moderate settings). Hue and lightness are kept in Oklab, but how much chroma survives is read off a straight line in linear RGB, and a small residual is removed along that line, so it is not the nearest in-gamut colour. At Saturation +100 the blue-to-white ramp has a crease in its slope (no step). In Display P3 exports of the same chart the largest step between neighbouring source levels is 6 to 8 levels, where a channel reaches zero at the gamut edge (a steep toe, not the old jump). Generated charts only, not a real photo.
 - **100% view:** a second full-size pipeline lives on the GPU while a photo is open at 100% (the source plus three `Rgba16Float` textures; roughly 0.7 GB for 26 MP, a guess from the texture sizes, not measured). Slider speed at 100% is unmeasured. Until the full size has decoded, the preview is shown enlarged. The histogram and pickers still read the 2560 px preview. An unedited photo matches its source exactly, and an edited one (Brilliance, Highlights, Shadows, Definition) matches its full-size sRGB export exactly.
 - **Neutral-point picker:** Temperature and Tint only reach ±0.3 and ±0.25 stops, so a strong cast is clamped at ±100 and only partly removed. It reads a 5×5 mean of the source pixels, ignoring the other adjustments.
-- **Designs not followed exactly:** Copy edits, Paste and Reset all use the raised button, not the design's quiet one; the before/after button is the small icon button, the design's is the regular size; the histogram's clipping squares are left out (no overlay to toggle); the 100% view, the neutral picker in use and the lit eye of a hidden section are not on the canvas (see "Designs still to draw").
+- **Designs not followed exactly:** Copy edits, Paste and Reset all use the raised button, not the design's quiet one; the before/after button is the small icon button, the design's is the regular size; the clipping squares sit in an 18 pt press area, larger than the design's 10 pt square; the 100% view, the neutral picker in use and the lit eye of a hidden section are not on the canvas (see "Designs still to draw").
 - **Local tone is tuned on one synthetic scene:** the base's two numbers (`EPSILON` in `base.wgsl`, how big a brightness step counts as an edge; `base_radius`, the window, 1/60 of the long edge) are guesses set by eye on a generated backlit scene. Real photos may want others.
 - **Local tone keeps fine texture, not everything:** detail about the size of the window or larger (broad clouds) counts as region and is still flattened, as the old global curves did. A region pushed more than halfway to black or white has its detail compressed too. Brightness and Contrast stay global.
 - **Local tone speed is unmeasured:** five extra quarter-size passes per edit change while Brilliance, Highlights or Shadows are set, and five more for Definition. Not timed on a 26 MP photo or during a drag.
@@ -81,6 +81,8 @@ Design column: ✅ designed on the canvas · ◐ partly · ✗ not designed · n
 - **Undo history:** lost on quit, and capped at 200 steps a photo. Rating and flag changes aren't steps. The top-bar arrows have no tooltip and their icons don't brighten on hover as the design's do.
 - **Before/after drops the crop too:** the original shows whole and unrotated, so a cropped photo jumps in size instead of comparing like with like.
 - **Copied edits live in the app only:** not on the system clipboard, gone on quit. Paste works on the photo open in Develop, one at a time; there is no paste from the Library or onto several photos.
+- **Clipping warnings are a rule of thumb:** highlights warn when any channel shows at 255, shadows only when all three show at 0. A fully saturated colour therefore warns as a highlight (the test chart's hue bars do). The test reads the pixel as drawn, so at Fit a clipped speck smaller than a screen pixel can go unmarked. There is no shortcut key and no count of clipped pixels.
+- **Edited thumbnails lag the edit:** a thumbnail is made again when you open another photo or leave Develop, not while you edit, and each time decodes the whole file (a RAF is developed again, a few seconds). A change to the pipeline's code doesn't refresh thumbnails already cached. A photo edited and then reset leaves its old edited thumbnail in the cache, unused.
 - **Verbose edit files:** reading is sparse (missing fields are neutral), but saving writes every field, so a rating alone produces a full file.
 - **Preview is 8-bit sRGB:** RUNE has no known path for high-bit-depth or P3 output of app-supplied images. Processing is float and exports are unaffected.
 - **TIFF exports carry no camera info.**
@@ -97,6 +99,8 @@ Everything was built against generated test images and one downloaded X-T4 RAF.
 - Panning with a real trackpad or mouse wheel (scripted drag and wheel events only)
 - Local tone (Brilliance, Highlights, Shadows) and Definition on any real photo: only a generated backlit scene so far
 - The top bar beside the real traffic lights, and in full screen: checked only against RUNE's headless overlay of where macOS draws them
+- Edited thumbnails of a RAF, and of a folder with many edited photos (each is decoded in full first): three generated PNGs so far. The filmstrip's refresh after moving to the next photo wasn't looked at on its own
+- Clipping warnings on a real photo and at 100%: the test chart at Fit only
 - Thumbnail speed on a folder of 26–40 MP files (first visit decodes each one)
 - Noise reduction at full size on a noisy high-ISO photo (the taps are spread apart for export; only seen on ISO 160)
 - Slider drag speed with noise reduction on (81 taps per pixel)
@@ -111,7 +115,7 @@ cargo run -p darkroom -- path/to/folder          # browse a folder (not remember
 cargo run -p darkroom -- path/to/photo.jpg       # open a photo in Develop (or a .RAF)
 cargo run -p darkroom -- --snap out.png --scene edited   # headless snapshot, no window
 # DARKROOM_NO_PREFS=1 ignores saved settings (root folder, thumbnail size), for tests
-# Develop scenes on the test chart: develop, edited, curves, curve-red, extreme, warm, hidden, original, definition, sharpen, denoise, crop, cropped, zoom, picking
+# Develop scenes on the test chart: develop, edited, curves, curve-red, extreme, warm, hidden, original, clipping, definition, sharpen, denoise, crop, cropped, zoom, picking
 # (the detail scenes need a photo with texture and noise to show anything)
 # the panel scrolls; for the Curves section in a snapshot add --size 1280x1500
 # drive it: --script events.json (clicks and drags in window points, or "key": an element's key)
@@ -165,7 +169,7 @@ Per pixel, in order:
    - **Too saturated for sRGB:** the colour loses chroma at constant Oklab hue and lightness until it fits.
    - **Far past white in luminance:** the colour fades gradually towards white.
 
-The working texture holds display-referred linear values. The present pass applies the geometry (see "Crop and straighten") and encodes.
+The working texture holds display-referred linear values. The present pass applies the geometry (see "Crop and straighten"), paints the clipping warnings when they are on, and encodes.
 
 ## Reading results back from the GPU
 
@@ -205,7 +209,7 @@ How it runs: one photo at a time. A background thread decodes the full image and
 `crates/darkroom/src/raw.rs` develops a RAF with [`rawler`](https://crates.io/crates/rawler) (LGPL-2.1): black and white levels, demosaicing, the camera's white balance and colour matrix. X-Trans sensors use rawler's Markesteijn demosaic, which rawler's own develop path doesn't use (it's bilinear and visibly softer). The result goes to the GPU as linear half floats (`Source::LinearHalf`) where a JPEG goes as 8-bit sRGB, so highlights and shadows have real latitude.
 
 - **Starting look:** sensor data is about a stop darker than the camera's JPEG. A fixed base tone (gain 1.8 with a soft shoulder over 0.7, on luminance) brings it level. The numbers come from one X-T4 sample against its embedded JPEG. There is no film simulation, so a RAF starts flatter and less saturated than the JPEG.
-- **Thumbnails and EXIF** come from the JPEG the camera embeds in every RAF (`darkroom-core/src/raf.rs`), so the grid shows the camera's rendering, not Darkroom's.
+- **Thumbnails and EXIF** come from the JPEG the camera embeds in every RAF (`darkroom-core/src/raf.rs`), so an unedited RAF shows the camera's rendering in the grid, not Darkroom's. Once edited, its thumbnail is Darkroom's.
 - **Speed:** a 26 MP RAF takes a few seconds to open in a debug build. Each open develops it again; nothing is cached.
 - **rawler in debug builds:** its demosaic relies on wrapping arithmetic, so the root `Cargo.toml` turns overflow checks off for that one package.
 
@@ -214,6 +218,7 @@ How it runs: one photo at a time. A background thread decodes the full image and
 - **No catalog:** the library is a root folder, chosen on first launch and remembered in RUNE's `Prefs`.
 - **Background work:** folder scans, folder loads (EXIF and edit files), thumbnails and opening a photo all run on background threads (`crates/darkroom/src/jobs.rs`). They post messages and wake the window, and `poll` applies them.
 - **Thumbnails:** 448 px on the long edge, cached as JPEGs in `~/Library/Caches/darkroom/thumbs`. The cache is keyed by path, size and modification time, so a folder opens instantly the second time.
+- **Edited thumbnails:** a photo with adjustments is decoded at thumbnail size on a worker, developed on the GPU the way an export is (`Preview.thumbs`, at most four a frame), and cached as `<key>.edit.jpg` beside `<key>.edit.key`, which names the edit it shows. A different edit replaces both files.
 - **Shortcuts:**
 
   | Key | Does |
@@ -255,7 +260,7 @@ So the preview never leaves the GPU, and processing stays in float until the fin
 - Before/after split view
 - The before/after button while the original shows (built as the accent-lit toggle)
 - Paste with nothing copied (built as a dimmed Paste button)
-- Clipping overlay on the photo
+- Clipping overlay on the photo (built as flat `clip-shadow` and `clip-highlight` over the clipped pixels)
 - Presets: list, save, apply
 - Paste edits with a choice of sections
 - White balance picker in use on the photo
@@ -279,6 +284,7 @@ Made:
 - **RAF decoder:** `rawler`, with its Markesteijn demosaic for X-Trans.
 - **Detail reach:** in preview pixels, scaled per render.
 - **Undo model:** per-photo history in memory (`darkroom-core/src/history.rs`), whole edits, nothing in the edit file.
+- **Edited thumbnails:** rendered through the develop pipeline, once per edit, when the photo is left.
 - **Edge-aware base:** a guided filter (He, Sun, Tang 2010) on quarter-size luminance, guided by itself. One set of passes serves Brilliance, Highlights, Shadows and Definition.
 
 Open:
@@ -287,7 +293,6 @@ Open:
 - **RAF preview:** cache the developed preview, or show the embedded JPEG first and swap.
 - **Exposure headroom:** values over white survive to the output step and are then mapped into SDR. An EDR preview would need a float display path.
 - **Thumbnail cache:** it lives in `~/Library/Caches/darkroom/thumbs` with no size limit or cleanup.
-- **Edited thumbnails:** render through the develop pipeline once per saved edit, or keep showing originals.
 
 ## Later (v2+)
 

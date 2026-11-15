@@ -4,6 +4,11 @@
 //!
 //! Thumbnails are cached on disk (`~/Library/Caches/darkroom/thumbs`), keyed by the photo's
 //! path, size and modification time, so a folder opens instantly the second time.
+//!
+//! An edited photo's thumbnail shows its edit, which only the GPU can develop. Its worker
+//! decodes the photo at thumbnail size and posts [`Msg::ThumbRender`]; the compositor develops
+//! it, and the readback thread ends in [`thumb_rendered`]. That thumbnail has one cache file
+//! per photo, beside a note of the edit it shows, so a changed edit replaces it.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,10 +18,12 @@ use std::time::SystemTime;
 
 use darkroom_core::exif::Exif;
 use darkroom_core::library::{self, Entry, Folder};
-use darkroom_core::{Edit, raf, sidecar};
+use darkroom_core::{Edit, Flag, raf, sidecar};
+use darkroom_render::Exported;
 use image::DynamicImage;
 use rune::Waker;
 
+use crate::export;
 use crate::photo::{self, Photo, Pixels};
 
 /// The long edge of a thumbnail, in pixels: sharp at the largest grid size on a Retina screen.
@@ -26,6 +33,8 @@ pub enum Msg {
     Tree(Folder),
     Folder { generation: u64, folder: PathBuf, entries: Vec<Entry> },
     Thumb { path: PathBuf, width: u32, height: u32, rgba: Vec<u8> },
+    /// An edited photo decoded at thumbnail size, for the GPU to develop into its thumbnail.
+    ThumbRender { prepared: Box<Prepared>, store: Option<ThumbStore> },
     Opened { path: PathBuf, result: Result<Box<(Photo, Edit)>, String> },
     /// The open photo decoded at full size, for 100% zoom.
     Full { photo: u64, result: Result<Box<Full>, String> },
@@ -43,6 +52,14 @@ pub struct Prepared {
     pub edit: Edit,
     /// Pixels here per pixel of the preview this photo is edited on, for the detail tools.
     pub detail_scale: f32,
+}
+
+/// Where an edited photo's thumbnail is cached, and the edit it will show.
+pub struct ThumbStore {
+    image: PathBuf,
+    /// Holds `key`, written after the image so a half-written pair reads as out of date.
+    note: PathBuf,
+    key: String,
 }
 
 /// A photo at its own size, for 100% zoom.
@@ -147,6 +164,11 @@ impl Jobs {
         }
     }
 
+    /// One photo's thumbnail again, after its edit changed. Leaves the queue as it is.
+    pub fn rethumbnail(&self, path: PathBuf) {
+        let _ = self.thumbs.send(ThumbJob { generation: self.thumb_generation.load(Ordering::Acquire), path });
+    }
+
     pub fn deliverer(&self) -> Deliver {
         Deliver { inbox: self.inbox.clone(), waker: self.waker.clone() }
     }
@@ -248,8 +270,10 @@ fn thumb_worker(receive: &Mutex<Receiver<ThumbJob>>, inbox: &Mutex<Vec<Msg>>, wa
         if job.generation != current.load(Ordering::Acquire) {
             continue;
         }
-        if let Some((width, height, rgba)) = thumbnail(&job.path) {
-            deliver(inbox, waker, Msg::Thumb { path: job.path, width, height, rgba });
+        match thumbnail(&job.path) {
+            Some(Thumb::Ready(width, height, rgba)) => deliver(inbox, waker, Msg::Thumb { path: job.path, width, height, rgba }),
+            Some(Thumb::Render(prepared, store)) => deliver(inbox, waker, Msg::ThumbRender { prepared, store }),
+            None => {}
         }
     }
 }
@@ -269,13 +293,72 @@ fn cache_path(path: &Path) -> Option<PathBuf> {
     Some(cache_dir().join(format!("{}.jpg", &hash.finalize().to_hex()[..32])))
 }
 
-/// The photo's thumbnail as straight sRGB RGBA: from the disk cache, or made from the photo
-/// (EXIF orientation applied) and cached.
-fn thumbnail(path: &Path) -> Option<(u32, u32, Vec<u8>)> {
+/// What a thumbnail job ends in.
+enum Thumb {
+    /// The thumbnail as straight sRGB RGBA: width, height, pixels.
+    Ready(u32, u32, Vec<u8>),
+    /// An edited photo the GPU has to develop first.
+    Render(Box<Prepared>, Option<ThumbStore>),
+}
+
+impl Thumb {
+    fn ready(img: DynamicImage) -> Thumb {
+        let rgba = img.into_rgba8();
+        Thumb::Ready(rgba.width(), rgba.height(), rgba.into_raw())
+    }
+}
+
+/// Names the look an edited thumbnail shows. Rating and flag don't change the picture.
+fn edit_key(edit: &Edit) -> String {
+    let look = Edit { rating: 0, flag: Flag::None, ..edit.clone() };
+    blake3::hash(sidecar::to_string(&look).unwrap_or_default().as_bytes()).to_hex().to_string()
+}
+
+/// An edited photo's thumbnail: from the disk cache when it shows this edit, or else the
+/// photo decoded at thumbnail size for the GPU. None when the photo can't be decoded.
+fn edited_thumbnail(path: &Path, edit: &Edit) -> Option<Thumb> {
+    let key = edit_key(edit);
+    let store = cache_path(path).map(|c| ThumbStore { image: c.with_extension("edit.jpg"), note: c.with_extension("edit.key"), key });
+    if let Some(s) = &store
+        && std::fs::read_to_string(&s.note).is_ok_and(|shown| shown == s.key)
+        && let Ok(img) = image::open(&s.image)
+    {
+        return Some(Thumb::ready(img));
+    }
+    let prepared = prepare(path, Some(THUMB_EDGE)).ok()?;
+    Some(Thumb::Render(Box::new(prepared), store))
+}
+
+/// Ends an edited thumbnail: the GPU's render becomes sRGB bytes, is cached, and goes to the
+/// library. Runs on the readback's thread.
+pub fn thumb_rendered(path: PathBuf, image: &Exported, store: Option<ThumbStore>) -> Msg {
+    let eight = &export::tables().0;
+    let [width, height] = image.size;
+    let rgba: Vec<u8> = image.rgba16f.iter().enumerate().map(|(i, &b)| if i % 4 == 3 { 255 } else { eight[b as usize] }).collect();
+    if let Some(s) = store
+        && let Some(small) = image::RgbaImage::from_raw(width, height, rgba.clone())
+    {
+        let _ = std::fs::create_dir_all(cache_dir());
+        if DynamicImage::ImageRgba8(small).into_rgb8().save_with_format(&s.image, image::ImageFormat::Jpeg).is_ok() {
+            let _ = std::fs::write(&s.note, &s.key);
+        }
+    }
+    Msg::Thumb { path, width, height, rgba }
+}
+
+/// The photo's thumbnail: from the disk cache, or made from the photo (EXIF orientation
+/// applied) and cached. An edited photo's goes through [`edited_thumbnail`]; if that can't
+/// decode it, the original's stands in.
+fn thumbnail(path: &Path) -> Option<Thumb> {
+    let edit = sidecar::load(path).unwrap_or_default();
+    if edit.has_adjustments()
+        && let Some(thumb) = edited_thumbnail(path, &edit)
+    {
+        return Some(thumb);
+    }
     let cached = cache_path(path);
     if let Some(img) = cached.as_ref().and_then(|c| image::open(c).ok()) {
-        let rgba = img.into_rgba8();
-        return Some((rgba.width(), rgba.height(), rgba.into_raw()));
+        return Some(Thumb::ready(img));
     }
     // A RAF's thumbnail is the JPEG the camera embedded: far quicker than developing it.
     let img = if raf::is_raf(path) { embedded(path)? } else { photo::decode(path).ok()? };
@@ -284,13 +367,23 @@ fn thumbnail(path: &Path) -> Option<(u32, u32, Vec<u8>)> {
         let _ = std::fs::create_dir_all(cache_dir());
         let _ = small.save_with_format(&c, image::ImageFormat::Jpeg);
     }
-    let rgba = DynamicImage::ImageRgb8(small).into_rgba8();
-    Some((rgba.width(), rgba.height(), rgba.into_raw()))
+    Some(Thumb::ready(DynamicImage::ImageRgb8(small)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_edited_thumbnail_is_keyed_by_the_look_alone() {
+        let mut edit = Edit::default();
+        edit.light.exposure = 0.5;
+        let rated = Edit { rating: 4, flag: Flag::Pick, ..edit.clone() };
+        assert_eq!(edit_key(&edit), edit_key(&rated));
+        let mut cropped = edit.clone();
+        cropped.geometry.straighten = 2.0;
+        assert_ne!(edit_key(&edit), edit_key(&cropped));
+    }
 
     #[test]
     fn detail_scale_is_measured_against_the_preview() {

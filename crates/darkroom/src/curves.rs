@@ -108,15 +108,25 @@ fn pickers(active: Option<Pick>, waiting: bool) -> El {
 
 /// The histogram at the top of the panel: red, green and blue over luminance, on the canvas
 /// ground, as the design system's Histogram, with the photo's exposure line (`exif`, empty
-/// when the file has none) under it.
-pub fn histogram_panel(h: &Histogram, exif: &str) -> El {
+/// when the file has none) under it between the two clipping squares.
+pub fn histogram_panel(s: &State) -> El {
     const W: f32 = 260.0;
     const H: f32 = 80.0;
+    let h = &s.histogram;
     let mut shape = Shape::new().fill(area(h, Channel::Rgb, W, H, 0.92), t::CHAN_LUMA.alpha(0.35));
     for c in [Channel::Blue, Channel::Green, Channel::Red] {
         shape = shape.fill(area(h, c, W, H, 0.92), tint(c).alpha(0.45));
     }
+    let exif = s.photo.exif.exposure_line();
     let line = (!exif.is_empty()).then(|| text(exif).key("exif").font(t::VALUE_SM).color(t::INK_MUTED));
+    let foot = row()
+        .w(W)
+        .center_y()
+        .child(clip_toggle("clip-shadows", "Show shadow clipping", t::CLIP_SHADOW, s.clip_shadows, |s| s.clip_shadows = !s.clip_shadows))
+        .child(spacer())
+        .children(line)
+        .child(spacer())
+        .child(clip_toggle("clip-highlights", "Show highlight clipping", t::CLIP_HIGHLIGHT, s.clip_highlights, |s| s.clip_highlights = !s.clip_highlights));
     col().key("histogram")
         .role("image")
         .label("Histogram")
@@ -127,7 +137,22 @@ pub fn histogram_panel(h: &Histogram, exif: &str) -> El {
         .radius(7.0)
         .fill(t::BG_CANVAS)
         .child(canvas(shape.view_box(W, H)).size(W, H))
-        .children(line)
+        .child(foot)
+}
+
+/// One of the histogram's clipping squares: filled with its warning's colour while the photo
+/// shows that warning. The square is the design's 10 points; the press area around it is larger.
+fn clip_toggle(key: &'static str, label: &'static str, colour: Color, on: bool, press: fn(&mut State)) -> El {
+    let square = el().size(10.0, 10.0).radius(3.0);
+    el().key(key)
+        .role("button")
+        .label(label)
+        .help(label)
+        .checked(on)
+        .size(18.0, 18.0)
+        .center()
+        .on_press(press)
+        .child(if on { square.fill(colour) } else { square.border(1.5, t::LINE_STRONG) })
 }
 
 /// RGB, Red, Green, Blue: the design system's SegmentedControl.

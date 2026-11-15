@@ -83,7 +83,7 @@ Where things live in the app crate:
 | `develop.rs`, `curves.rs`, `crop.rs` | The Develop module's panels and tools |
 | `library.rs` | The Library module |
 | `export.rs` | Export settings, dialog, and file writing |
-| `jobs.rs` | Background threads and the thumbnail cache |
+| `jobs.rs` | Background threads and the thumbnail cache (edited thumbnails are developed in the compositor) |
 | `photo.rs`, `raw.rs` | Decoding a photo into `Pixels` (8-bit sRGB or linear half float) |
 | `ui.rs`, `theme.rs` | Shared controls; colour and type tokens |
 
@@ -157,7 +157,7 @@ export DARKROOM_NO_PREFS=1 HOME=/path/to/scratch/home
 ./target/debug/darkroom path/to/folder --snap out.png --script events.json
 ```
 
-- Scenes: `develop, edited, curves, curve-red, extreme, definition, sharpen, denoise, warm, crop, cropped, hidden, original, zoom, picking`. Add a scene when you add a state worth looking at.
+- Scenes: `develop, edited, curves, curve-red, extreme, definition, sharpen, denoise, warm, crop, cropped, hidden, original, clipping, zoom, picking`. Add a scene when you add a state worth looking at.
 - The right-hand panel scrolls; use `--size 1280x1500` to see the lower sections.
 - `DARKROOM_DEBUG=1` prints each GPU readback.
 
@@ -195,6 +195,6 @@ The user tests the native folder picker and their own camera files by hand; head
 `README.md` under "Status" has the full lists. The ones most likely to bite:
 
 - At 100% a second, full-size `Develop` lives in the compositor (`Preview.full`); its memory and slider speed are unmeasured.
-- Thumbnails show the original (or the camera's embedded JPEG for RAF), not the edit.
+- An edited photo's thumbnail is made again only when the photo is left, and a pipeline change doesn't refresh thumbnails already cached (delete `~/Library/Caches/darkroom/thumbs/*.edit.*`).
 - The RAF starting look is a base tone fitted to one X-T4 sample, with no film simulation.
 - No presets, before/after split, or multi-select yet; paste takes all sections, one photo at a time.

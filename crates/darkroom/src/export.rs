@@ -120,7 +120,7 @@ pub fn unique_path(dir: &Path, stem: &str, ext: &str) -> PathBuf {
 }
 
 /// Half-float bits → sRGB-encoded 8- and 16-bit values, for every possible half.
-fn tables() -> &'static (Vec<u8>, Vec<u16>) {
+pub fn tables() -> &'static (Vec<u8>, Vec<u16>) {
     static TABLES: OnceLock<(Vec<u8>, Vec<u16>)> = OnceLock::new();
     TABLES.get_or_init(|| {
         let encode = |bits: u16| {

@@ -76,6 +76,10 @@ pub struct Placement {
     pub map: [f32; 6],
     /// Linear RGB shown off the photo, where a straightened photo's corners turn away.
     pub background: [f32; 3],
+    /// The clipping warnings, each the linear RGB to paint or None when off: over pixels that
+    /// show as pure black, and over pixels with a channel at full.
+    pub clip_shadow: Option<[f32; 3]>,
+    pub clip_highlight: Option<[f32; 3]>,
 }
 
 #[repr(C)]
@@ -86,6 +90,8 @@ struct PresentUniform {
     map_abcd: [f32; 4],
     map_ef: [f32; 4],
     background: [f32; 4],
+    clip_shadow: [f32; 4],
+    clip_highlight: [f32; 4],
 }
 
 const WORKING_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -622,12 +628,16 @@ impl Develop {
         let ndc = [x / tw * 2.0 - 1.0, 1.0 - y / th * 2.0, (x + w) / tw * 2.0 - 1.0, 1.0 - (y + h) / th * 2.0];
         let [a, b, c, d, e, f] = at.map;
         let [r, g, bl] = at.background;
+        // Alpha switches the warning on.
+        let clip = |colour: Option<[f32; 3]>| colour.map_or([0.0; 4], |[r, g, b]| [r, g, b, 1.0]);
         let uniform = PresentUniform {
             ndc,
             encode: [if at.encode_srgb { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
             map_abcd: [a, b, c, d],
             map_ef: [e, f, 0.0, 0.0],
             background: [r, g, bl, 1.0],
+            clip_shadow: clip(at.clip_shadow),
+            clip_highlight: clip(at.clip_highlight),
         };
         queue.write_buffer(&self.present_uniform, 0, bytemuck::bytes_of(&uniform));
         pass.set_pipeline(pipeline);
