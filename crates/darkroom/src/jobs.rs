@@ -9,12 +9,16 @@
 //! decodes the photo at thumbnail size and posts [`Msg::ThumbRender`]; the compositor develops
 //! it, and the readback thread ends in [`thumb_rendered`]. That thumbnail has one cache file
 //! per photo, beside a note of the edit it shows, so a changed edit replaces it.
+//!
+//! The library root is watched (FSEvents, through `notify`). Changes arrive in bursts, a card
+//! import or a Finder copy, so they are gathered until things go quiet and posted as one
+//! [`Msg::Changed`].
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use darkroom_core::exif::Exif;
 use darkroom_core::library::{self, Entry, Folder};
@@ -28,6 +32,10 @@ use crate::photo::{self, Photo, Pixels};
 
 /// The long edge of a thumbnail, in pixels: sharp at the largest grid size on a Retina screen.
 const THUMB_EDGE: u32 = 448;
+/// A burst of changes on disk ends when nothing has changed for this long...
+const QUIET: Duration = Duration::from_millis(400);
+/// ...or after this long, so a long copy shows its photos as it goes.
+const LONGEST: Duration = Duration::from_secs(2);
 
 pub enum Msg {
     Tree(Folder),
@@ -42,6 +50,8 @@ pub enum Msg {
     ExportPrepared { run: u64, index: usize, result: Result<Box<Prepared>, String> },
     /// A photo written (or not) by an export.
     Exported { run: u64, index: usize, result: Result<PathBuf, String> },
+    /// Photos or folders under the root changed on disk, as paths under the root as it was given.
+    Changed(Vec<PathBuf>),
 }
 
 /// A photo ready to render for export: its pixels at export size (sRGB RGBA8) and its edit.
@@ -98,6 +108,8 @@ pub struct Jobs {
     thumb_generation: Arc<AtomicU64>,
     /// Bumped per folder load, so a slow load for a folder you've left is ignored.
     folder_generation: u64,
+    /// Watches the root; dropping it ends the watch and its thread.
+    watcher: Option<notify::RecommendedWatcher>,
 }
 
 impl Jobs {
@@ -115,7 +127,40 @@ impl Jobs {
                 .spawn(move || thumb_worker(&receive, &inbox, &waker, &current))
                 .expect("thumbnail worker");
         }
-        Jobs { inbox, waker, thumbs, thumb_generation, folder_generation: 0 }
+        Jobs { inbox, waker, thumbs, thumb_generation, folder_generation: 0, watcher: None }
+    }
+
+    /// Watches `root` and everything under it, in place of any earlier root.
+    pub fn watch(&mut self, root: &Path) -> Result<(), String> {
+        use notify::Watcher;
+        self.watcher = None;
+        let (send, receive) = channel::<PathBuf>();
+        let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            for path in event.map(|e| e.paths).unwrap_or_default() {
+                let _ = send.send(path);
+            }
+        })
+        .map_err(|e| e.to_string())?;
+        watcher.watch(root, notify::RecursiveMode::Recursive).map_err(|e| e.to_string())?;
+        // FSEvents names files by their real path (/private/tmp for /tmp); the app knows them
+        // under the root as it was given.
+        let real = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_owned());
+        let (root, inbox, waker) = (root.to_owned(), self.inbox.clone(), self.waker.clone());
+        std::thread::Builder::new()
+            .name("darkroom-watch".into())
+            .spawn(move || {
+                while let Some(paths) = settle(&receive) {
+                    let mut paths: Vec<PathBuf> = paths.into_iter().map(|p| p.strip_prefix(&real).map_or(p.clone(), |rest| root.join(rest))).filter(|p| library::is_library_change(p)).collect();
+                    paths.sort();
+                    paths.dedup();
+                    if !paths.is_empty() {
+                        deliver(&inbox, &waker, Msg::Changed(paths));
+                    }
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        self.watcher = Some(watcher);
+        Ok(())
     }
 
     /// Called from `setup`, once the window can be woken. Wakes it at once for anything that
@@ -239,6 +284,21 @@ fn embedded(path: &Path) -> Option<DynamicImage> {
     let mut img = DynamicImage::from_decoder(decoder).ok()?;
     img.apply_orientation(orientation);
     Some(img)
+}
+
+/// The paths of the next burst of changes: from the first until none has come for [`QUIET`],
+/// or for at most [`LONGEST`]. None once the watch has ended.
+fn settle(receive: &Receiver<PathBuf>) -> Option<Vec<PathBuf>> {
+    let mut paths = vec![receive.recv().ok()?];
+    let start = Instant::now();
+    while start.elapsed() < LONGEST {
+        match receive.recv_timeout(QUIET) {
+            Ok(path) => paths.push(path),
+            Err(RecvTimeoutError::Timeout) => break,
+            Err(RecvTimeoutError::Disconnected) => return None,
+        }
+    }
+    Some(paths)
 }
 
 fn deliver(inbox: &Mutex<Vec<Msg>>, waker: &Mutex<Option<Waker>>, msg: Msg) {

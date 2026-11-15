@@ -303,7 +303,29 @@ impl State {
         self.jobs.scan(root.clone());
         let last = self.prefs.get::<PathBuf>("folder").filter(|f| f.starts_with(&root) && f.is_dir());
         self.root = Some(root.clone());
+        self.watch_root();
         self.open_folder(last.unwrap_or(root));
+    }
+
+    /// Watches the root, so photos and folders added or removed outside Darkroom show up.
+    fn watch_root(&mut self) {
+        let Some(root) = self.root.clone() else { return };
+        if let Err(e) = self.jobs.watch(&root) {
+            self.status = format!("Not watching the folder for changes: {e}");
+        }
+    }
+
+    /// Photos or folders under the root changed on disk. The tree is scanned again, and the
+    /// folder shown is read again if the change is in it; the grid keeps showing the old
+    /// photos until the new list arrives.
+    fn changed_on_disk(&mut self, paths: &[PathBuf]) {
+        let Some(root) = self.root.clone() else { return };
+        self.jobs.scan(root);
+        if let Some(folder) = self.folder.clone()
+            && paths.iter().any(|p| *p == folder || p.parent() == Some(&folder))
+        {
+            self.folder_generation = self.jobs.load_folder(folder);
+        }
     }
 
     /// Shows `folder`'s photos, loading them in the background.
@@ -426,6 +448,15 @@ impl State {
                 if generation != self.folder_generation || self.folder.as_ref() != Some(&folder) {
                     return;
                 }
+                // Read again after a change on disk: a photo that went loses its thumbnail and
+                // its place in the selection, and one whose file changed gets a new thumbnail.
+                let now: HashMap<&Path, _> = entries.iter().map(|e| (e.path.as_path(), e.modified)).collect();
+                for old in &self.entries {
+                    if now.get(old.path.as_path()) != Some(&old.modified) {
+                        self.thumbs.remove(&old.path);
+                    }
+                }
+                self.selected.retain(|p| now.contains_key(p));
                 self.entries = entries;
                 self.loading_folder = false;
                 let visible = self.visible();
@@ -435,6 +466,7 @@ impl State {
                 let wanted: Vec<PathBuf> = visible.iter().map(|&i| self.entries[i].path.clone()).filter(|p| !self.thumbs.contains_key(p)).collect();
                 self.jobs.thumbnails(wanted);
             }
+            Msg::Changed(paths) => self.changed_on_disk(&paths),
             Msg::ThumbRender { prepared, store } => self.thumb_gpu.push((prepared, store)),
             Msg::Thumb { path, width, height, rgba } => {
                 if let Some(images) = &self.images {
@@ -594,6 +626,7 @@ fn init() -> State {
             // browse its folder.
             if let Some(folder) = file.parent().filter(|p| !p.as_os_str().is_empty()) {
                 s.root = Some(folder.to_owned());
+                s.watch_root();
                 s.jobs.scan(folder.to_owned());
                 s.open_folder(folder.to_owned());
             }

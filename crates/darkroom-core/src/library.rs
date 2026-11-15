@@ -67,6 +67,15 @@ pub fn scan(root: &Path) -> Folder {
     Folder { path: root.to_owned(), name, photos, children }
 }
 
+/// Whether a change on disk at `path` can change what the library shows: a photo, a folder, or
+/// something gone that may have been a folder. Edit files and the temporary files of saves and
+/// exports are Darkroom's own writes, and hidden files (`.DS_Store`) are nobody's photos.
+pub fn is_library_change(path: &Path) -> bool {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let own = [crate::sidecar::SUFFIX, ".tmp", ".partial"].iter().any(|s| name.ends_with(s));
+    !own && !hidden(path) && (is_photo(path) || path.is_dir() || !path.exists())
+}
+
 /// The photos directly in `folder`, sorted by file name.
 pub fn photos_in(folder: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = fs::read_dir(folder)
@@ -194,6 +203,15 @@ impl Selection {
         self.others = order[from.min(to)..=from.max(to)].iter().filter(|p| self.primary.as_ref() != Some(*p)).cloned().collect();
     }
 
+    /// Keeps only the photos `keep` accepts, as when some leave the folder. A primary that goes
+    /// hands its role to the photo added before it.
+    pub fn retain(&mut self, keep: impl Fn(&Path) -> bool) {
+        self.others.retain(|p| keep(p));
+        if self.primary.as_deref().is_some_and(|p| !keep(p)) {
+            self.primary = self.others.pop();
+        }
+    }
+
     /// Selects all of `order`, keeping the primary if it is among them.
     pub fn all(&mut self, order: &[PathBuf]) {
         let primary = self.primary.take().filter(|p| order.contains(p)).or_else(|| order.first().cloned());
@@ -299,6 +317,35 @@ mod tests {
         let mut none = Selection::default();
         none.extend_to("b".into(), &order);
         assert_eq!(selected(&none, &order), "b*");
+    }
+
+    #[test]
+    fn photos_that_leave_drop_out_of_the_selection() {
+        let order = paths(&["a", "b", "c", "d"]);
+        let mut s = Selection::only("a".into());
+        s.toggle("c".into());
+        s.toggle("d".into());
+        s.retain(|p| p != Path::new("c"));
+        assert_eq!(selected(&s, &order), "a d*");
+        s.retain(|p| p != Path::new("d"));
+        assert_eq!(selected(&s, &order), "a*", "the photo added before takes over");
+        s.retain(|_| false);
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn only_photos_and_folders_are_library_changes() {
+        let root = std::env::temp_dir().join(format!("darkroom-change-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("day 2")).unwrap();
+        fs::write(root.join("notes.txt"), b"").unwrap();
+        for changed in ["DSCF0001.JPG", "DSCF0002.RAF", "day 2", "a folder that went"] {
+            assert!(is_library_change(&root.join(changed)), "{changed}");
+        }
+        for ignored in ["DSCF0001.JPG.darkroom", "DSCF0001.JPG.darkroom.tmp", "DSCF0001.jpg.partial", ".DS_Store", "notes.txt", ".hidden.jpg"] {
+            assert!(!is_library_change(&root.join(ignored)), "{ignored}");
+        }
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

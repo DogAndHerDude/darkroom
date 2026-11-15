@@ -38,6 +38,7 @@ Phase: **implementation.** Every v1 area has a working first version. What follo
 | Edited thumbnails | The grid, the info panel and the filmstrip show an edited photo as edited, crop included; made again when you leave the photo |
 | Crop | Aspect presets (Free, Original, 1:1, 4:5, 16:9), straighten ±45°, rotate 90°, flip; applied in preview and export |
 | Library | Folder tree, thumbnail grid with disk cache, show All/Picks/Rejects, minimum rating, sort by time or name, thumbnail size, info panel with EXIF |
+| Folder watching | The root and everything under it are watched (FSEvents). Photos added, removed or replaced, and folders added or removed, show up in the tree, grid and filmstrip within about half a second of the last change (at most 2 s into a long copy). A removed photo leaves the selection; a replaced one gets a new thumbnail. Darkroom's own edit files and temporary files don't count as changes |
 | Film simulation | The info panel shows a Fujifilm photo's simulation, grain effect, color chrome, dynamic range and white balance, read from the camera's MakerNote (JPEG, or a RAF's embedded JPEG). Shown only; it doesn't change how the photo is developed |
 | Multi-select | In the grid: ⌘-click adds a photo or takes it out, ⇧-click selects the range from the photo clicked before, ⌘A selects all shown. Ratings, flags, paste and export act on the whole selection; the info panel shows the photo clicked last |
 | Ratings and flags | In the Library and Develop, by click or key |
@@ -55,7 +56,6 @@ In the spec or the designs, with no code yet.
 | Paste with a choice of sections | ✗ | Paste always takes all four sections |
 | Before/after split view | ✗ | The held key and the toggle are built |
 | Film simulation under the photo's name in Develop | ✅ | The design's top bar reads "Classic Chrome · 4 of 248"; only the name is shown |
-| Folder watching | n/a | New photos appear after reopening the folder |
 | Missing folder or drive, unreadable file | ✗ | Failures show as a line of status text only |
 | Export file naming | ✅ | Files keep the photo's name; no template |
 | Curves luminance-only mode | ✗ | Still "maybe" in the spec |
@@ -89,6 +89,7 @@ Design column: ✅ designed on the canvas · ◐ partly · ✗ not designed · n
 - **Clipping warnings are a rule of thumb:** highlights warn when any channel shows at 255, shadows only when all three show at 0. A fully saturated colour therefore warns as a highlight (the test chart's hue bars do). The test reads the pixel as drawn, so at Fit a clipped speck smaller than a screen pixel can go unmarked. There is no shortcut key and no count of clipped pixels.
 - **Edited thumbnails lag the edit:** a thumbnail is made again when you open another photo or leave Develop, not while you edit, and each time decodes the whole file (a RAF is developed again, a few seconds). A change to the pipeline's code doesn't refresh thumbnails already cached. A photo edited and then reset leaves its old edited thumbnail in the cache, unused.
 - **Presets are Develop only and undesigned:** built without a design, in the panel's style. No applying a preset to the Library's selection, no rename, no updating a preset with a new look (delete and save again), no folders of presets. The folder is read at launch and after a save or delete, so a file added in Finder shows on the next launch. A deleted preset is gone (no undo, no Trash). A preset file that doesn't parse is skipped and named in the status line, and only the first such file is named. Preset files are written in full, like edit files. The section sits below Detail, so it is off screen until the panel is scrolled.
+- **Folder watching leaves the open photo alone:** a photo open in Develop that is replaced on disk keeps showing the old pixels until it is opened again; one that is deleted stays open, and editing it writes an edit file for a photo that is gone. Edit files changed by another app (a sync, another Mac) aren't picked up until the folder is opened again, since Darkroom's own saves are ignored by name. Every change reads the whole folder again (EXIF and edit file of every photo) and scans the whole tree; untimed on a large folder or tree. A photo still being copied may get no thumbnail until the copy's last change comes in. A watch that can't start says so in the status line only (which the Library doesn't show).
 - **Verbose edit files:** reading is sparse (missing fields are neutral), but saving writes every field, so a rating alone produces a full file.
 - **Preview is 8-bit sRGB:** RUNE has no known path for high-bit-depth or P3 output of app-supplied images. Processing is float and exports are unaffected.
 - **TIFF exports carry no camera info.**
@@ -111,6 +112,7 @@ Everything was built against generated test images and one downloaded X-T4 RAF.
 - Thumbnail speed on a folder of 26–40 MP files (first visit decodes each one)
 - Noise reduction at full size on a noisy high-ISO photo (the taps are spread apart for export; only seen on ISO 160)
 - Slider drag speed with noise reduction on (81 taps per pixel)
+- Folder watching with a Finder copy, a card import, an external or network drive, or a large folder: `cp`, `mkdir` and `rm` from a shell on four generated PNGs only
 - Presets from a real keyboard and mouse, and in the real `~/Library/Application Support`: scripted clicks and typing in a scratch home only, on the test chart and one generated PNG
 - Exported capture time and lens info as other apps read them
 - Display P3 exports viewed on a P3 screen
@@ -225,6 +227,7 @@ How it runs: one photo at a time. A background thread decodes the full image and
 
 - **No catalog:** the library is a root folder, chosen on first launch and remembered in RUNE's `Prefs`.
 - **Background work:** folder scans, folder loads (EXIF and edit files), thumbnails and opening a photo all run on background threads (`crates/darkroom/src/jobs.rs`). They post messages and wake the window, and `poll` applies them.
+- **Watching:** one recursive FSEvents watch on the root, through [`notify`](https://crates.io/crates/notify) (CC0-1.0). A thread gathers each burst of changes (until 400 ms pass with none, or 2 s at most), drops Darkroom's own files, and posts them as one message; the tree is then scanned again, and the folder shown is read again if the change is in it.
 - **Thumbnails:** 448 px on the long edge, cached as JPEGs in `~/Library/Caches/darkroom/thumbs`. The cache is keyed by path, size and modification time, so a folder opens instantly the second time.
 - **Edited thumbnails:** a photo with adjustments is decoded at thumbnail size on a worker, developed on the GPU the way an export is (`Preview.thumbs`, at most four a frame), and cached as `<key>.edit.jpg` beside `<key>.edit.key`, which names the edit it shows. A different edit replaces both files.
 - **Shortcuts:**

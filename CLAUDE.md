@@ -83,7 +83,7 @@ Where things live in the app crate:
 | `develop.rs`, `curves.rs`, `crop.rs`, `presets.rs` | The Develop module's panels and tools |
 | `library.rs` | The Library module |
 | `export.rs` | Export settings, dialog, and file writing |
-| `jobs.rs` | Background threads and the thumbnail cache (edited thumbnails are developed in the compositor) |
+| `jobs.rs` | Background threads, the thumbnail cache (edited thumbnails are developed in the compositor), and the watch on the root folder |
 | `photo.rs`, `raw.rs` | Decoding a photo into `Pixels` (8-bit sRGB or linear half float) |
 | `ui.rs`, `theme.rs` | Shared controls; colour and type tokens |
 
