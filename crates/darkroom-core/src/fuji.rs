@@ -3,8 +3,8 @@
 //! The MakerNote is Fujifilm's own block inside the EXIF: the text `FUJIFILM`, the offset of a
 //! tag table, and the table itself, always little-endian, with offsets counted from the start of
 //! the block. The tag numbers and their values follow ExifTool's FujiFilm table
-//! (https://exiftool.org/TagNames/FujiFilm.html). Only the look is read; nothing here changes how
-//! a photo is developed.
+//! (https://exiftool.org/TagNames/FujiFilm.html). Only the look is read. A RAF's starting look is
+//! fitted from its embedded JPEG (`camera_look`); from here it takes only whether to drop colour.
 
 /// The camera's look settings as the info panel shows them. Each is present only if the file
 /// has it and its value is one known here.
@@ -54,6 +54,11 @@ impl Look {
             white_balance: value(WHITE_BALANCE).and_then(white_balance),
         };
         (look != Look::default()).then_some(look)
+    }
+
+    /// Whether the simulation renders in black and white. Sepia is toned, so it isn't.
+    pub fn is_black_and_white(&self) -> bool {
+        self.simulation.as_deref().is_some_and(|s| s.starts_with("Monochrome") || s.starts_with("Acros"))
     }
 
     /// Label and value for each setting present, in the info panel's order.
@@ -193,6 +198,10 @@ mod tests {
     fn a_black_and_white_mode_is_the_simulation() {
         let look = Look::read(&note(&[(SATURATION, 3, 0x501), (DYNAMIC_RANGE_SETTING, 3, 1), (DEVELOPMENT_DYNAMIC_RANGE, 3, 400), (AUTO_DYNAMIC_RANGE, 3, 100)])).unwrap();
         assert_eq!(look.rows(), [("Simulation", "Acros + R"), ("Dynamic range", "DR400")]);
+        assert!(look.is_black_and_white());
+        assert!(Look::read(&note(&[(SATURATION, 3, 0x302)])).unwrap().is_black_and_white());
+        assert!(!Look::read(&note(&[(SATURATION, 3, 0x310)])).unwrap().is_black_and_white(), "sepia is toned");
+        assert!(!Look::read(&note(&[(FILM_MODE, 3, 0x600)])).unwrap().is_black_and_white());
     }
 
     #[test]

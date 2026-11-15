@@ -39,7 +39,7 @@ Phase: **implementation.** Every v1 area has a working first version. What follo
 | Crop | Aspect presets (Free, Original, 1:1, 4:5, 16:9), straighten ±45°, rotate 90°, flip; applied in preview and export |
 | Library | Folder tree, thumbnail grid with disk cache, show All/Picks/Rejects, minimum rating, sort by time or name, thumbnail size, info panel with EXIF |
 | Folder watching | The root and everything under it are watched (FSEvents). Photos added, removed or replaced, and folders added or removed, show up in the tree, grid and filmstrip within about half a second of the last change (at most 2 s into a long copy). A removed photo leaves the selection; a replaced one gets a new thumbnail. Darkroom's own edit files and temporary files don't count as changes |
-| Film simulation | The info panel shows a Fujifilm photo's simulation, grain effect, color chrome, dynamic range and white balance, read from the camera's MakerNote (JPEG, or a RAF's embedded JPEG). Shown only; it doesn't change how the photo is developed |
+| Film simulation | The info panel shows a Fujifilm photo's simulation, grain effect, color chrome, dynamic range and white balance, read from the camera's MakerNote (JPEG, or a RAF's embedded JPEG). A RAF starts in the camera's look (below); for a JPEG it is shown only |
 | Multi-select | In the grid: ⌘-click adds a photo or takes it out, ⇧-click selects the range from the photo clicked before, ⌘A selects all shown. Ratings, flags, paste and export act on the whole selection; the info panel shows the photo clicked last |
 | Ratings and flags | In the Library and Develop, by click or key |
 | Filmstrip | In Develop, with ← → |
@@ -47,6 +47,7 @@ Phase: **implementation.** Every v1 area has a working first version. What follo
 | Export | JPEG, PNG, 16-bit TIFF; long-edge resize; sRGB or Display P3 with ICC profile; camera info without location; one photo, the Library's selection, or everything shown; progress and failures listed |
 | Releases | `scripts/tag.sh` bumps the version, tests, commits and tags; a pushed tag builds macOS, Linux and Windows packages on GitHub Actions and publishes them as a release (see "Releasing") |
 | RAF | Developed with `rawler` to linear floats; thumbnails and EXIF from the embedded JPEG |
+| RAF starting look | An unedited RAF starts as the camera rendered it: a tone curve and a chroma curve are fitted per photo against the embedded JPEG, so the film simulation, dynamic range and tone settings carry over, and the edit file stays empty. A black-and-white simulation (from the MakerNote) starts in black and white. Highlights the JPEG clipped roll off under white, so they stay recoverable |
 
 ### Not built
 
@@ -77,8 +78,8 @@ Design column: ✅ designed on the canvas · ◐ partly · ✗ not designed · n
 - **Local tone speed is unmeasured:** five extra quarter-size passes per edit change while Brilliance, Highlights or Shadows are set, and five more for Definition. Not timed on a 26 MP photo or during a drag.
 - **Sharpening raises noise** in flat areas (sd 7 → 11 at 80 on the noisy test image). Wants a masking control.
 - **Film simulation names are mostly unseen:** the tag numbers and values come from ExifTool's Fujifilm table, and the names are written as the X series' menus have them, from memory ("Shade", "Fluorescent 1", "Auto, ambience priority", "Eterna Bleach Bypass"). Only one camera file was read (an X-T4: Provia, grain off, color chrome off, DR100, auto white balance); every other value was seen only on a copy of that file with the numbers changed by hand. A value not in the table shows no row. Color Chrome FX Blue, a Kelvin white balance's number and the older cameras' portrait modes aren't shown. The info panel's label column is 88 pt, set so "Dynamic range" and the exposure line both fit; a longer lens name or exposure line would run out of the panel.
-- **RAF look:** no film simulation, and a base tone fitted to one X-T4 sample. A RAF starts flatter and less saturated than its JPEG.
-- **RAF speed:** a few seconds to open (debug build), developed again on every open.
+- **RAF look is tone and chroma only:** a simulation's hue shifts aren't fitted. On five downloaded samples (four Provia and a Classic Chrome on X-T3, X-T4, X-T5, X-Pro3; DR100) the middle of the picture comes within about 1–4 of 255 levels of the camera's JPEG at each luminance percentile, and within a few thousandths in Oklab chroma. On a Velvia sample (X100V) reds come out magenta where the camera's go orange, the sky is paler, and shadows sit 6–8 levels high. The deepest highlights come out up to about 10 levels darker than the camera's (the roll-off is gentler than its clipping). No black-and-white, Sepia, DR200 or DR400 sample has been tried; black and white is tested on generated data only, and Sepia's tint is lost (it comes out as low colour, untoned). The JPEG must have the raw's proportions, or the fixed base tone (gain 1.8, shoulder 0.7, fitted to one X-T4 sample) stands in, as it does for a RAF with no JPEG. Fujifilm cameras can write the JPEG in Adobe RGB; that case is read as sRGB.
+- **RAF speed:** about 4–5 s to open a 26 MP RAF in a debug build, 1.5 s of it the look's fit and apply (measured on an X-T4 sample, whole run including the headless frame). Developed again on every open.
 - **RAF hot pixels:** isolated bright pixels at 100%; the camera maps them out, nothing here does.
 - **RAF + JPEG pairs** show as two separate photos.
 - **Undo history:** lost on quit, and capped at 200 steps a photo. Rating and flag changes aren't steps. The top-bar arrows have no tooltip and their icons don't brighten on hover as the design's do.
@@ -98,7 +99,9 @@ Design column: ✅ designed on the canvas · ◐ partly · ✗ not designed · n
 
 ### Not yet tried on real files
 
-Everything was built against generated test images and one downloaded X-T4 RAF.
+Everything was built against generated test images and six RAFs downloaded from raw.pixls.us (X-T3, X-T4, X-T5, X-Pro3, X-E4, X100V).
+
+- The RAF starting look on the user's own RAFs, and on any black-and-white, Sepia, Classic Neg., Eterna, DR200 or DR400 shot
 
 - The native folder picker (headless runs can't open it), for the library root and the export destination
 - Real Fujifilm JPEGs: EXIF fields, orientation, speed (the EXIF line was seen only on a JPEG with hand-written EXIF)
@@ -109,7 +112,7 @@ Everything was built against generated test images and one downloaded X-T4 RAF.
 - The top bar beside the real traffic lights, and in full screen: checked only against RUNE's headless overlay of where macOS draws them
 - Edited thumbnails of a RAF, and of a folder with many edited photos (each is decoded in full first): three generated PNGs so far. The filmstrip's refresh after moving to the next photo wasn't looked at on its own
 - Clipping warnings on a real photo and at 100%: the test chart at Fit only
-- Film simulation on the user's own cameras and settings: one downloaded X-T4 RAF and its embedded JPEG so far
+- Film simulation names on the user's own cameras and settings: six downloaded RAFs (Provia, Classic Chrome, Velvia) so far
 - ⌘-click, ⇧-click and ⌘A from a real mouse and keyboard: scripted clicks with held modifiers only, on six generated PNGs
 - Thumbnail speed on a folder of 26–40 MP files (first visit decodes each one)
 - Noise reduction at full size on a noisy high-ISO photo (the taps are spread apart for export; only seen on ISO 160)
@@ -164,7 +167,7 @@ A pushed `vX.Y.Z` tag starts `.github/workflows/release.yml`: `scripts/build.sh`
 | Crate | What |
 | --- | --- |
 | `crates/darkroom` | The app: RUNE UI, state, background jobs, raw decoding, export file writing, and the `Preview` compositor that draws the photo |
-| `crates/darkroom-core` | The edit model (`Edit`), monotone cubic curves, geometry (crop and straighten as one affine map), undo history, edit-file load/save, the library scan, EXIF, and the RAF header. No GPU or UI |
+| `crates/darkroom-core` | The edit model (`Edit`), monotone cubic curves, geometry (crop and straighten as one affine map), undo history, edit-file load/save, the library scan, EXIF, the RAF header, and the camera look fitted from a RAF's JPEG. No GPU or UI |
 | `crates/darkroom-render` | GPU develop pipeline: `Params::from_edit`, the compute passes into `Rgba16Float` textures, histogram and probe readback, the present pass that draws into RUNE's render pass, and the full-size export render |
 
 ## Edit files
@@ -240,9 +243,9 @@ How it runs: one photo at a time. A background thread decodes the full image and
 
 `crates/darkroom/src/raw.rs` develops a RAF with [`rawler`](https://crates.io/crates/rawler) (LGPL-2.1): black and white levels, demosaicing, the camera's white balance and colour matrix. X-Trans sensors use rawler's Markesteijn demosaic, which rawler's own develop path doesn't use (it's bilinear and visibly softer). The result goes to the GPU as linear half floats (`Source::LinearHalf`) where a JPEG goes as 8-bit sRGB, so highlights and shadows have real latitude.
 
-- **Starting look:** sensor data is about a stop darker than the camera's JPEG. A fixed base tone (gain 1.8 with a soft shoulder over 0.7, on luminance) brings it level. The numbers come from one X-T4 sample against its embedded JPEG. There is no film simulation, so a RAF starts flatter and less saturated than the JPEG.
+- **Starting look:** the camera's, fitted per photo against the JPEG it embedded (`darkroom-core/src/camera_look.rs`). The two can't be compared pixel by pixel, because the camera corrects lens distortion and vignetting in its JPEG and the raw is uncorrected. They are compared by distribution instead, over the middle 60% of each, shrunk to 512 px: the raw's n-th percentile of luminance becomes the JPEG's n-th percentile, which gives a tone curve, and the same for Oklab chroma in the midtones gives a chroma curve. A curve and not one scale, because the camera lifts muted colour (foliage) far more than strong colour (a colour chart). The tone curve is applied to luminance as a ratio, so hue holds; past the JPEG's clipping it rolls off towards white. The MakerNote's black-and-white simulations take all the colour out. The result is baked into the decoded pixels, so every slider at 0 is the camera's look. Without a usable JPEG, a fixed base tone stands in (gain 1.8, shoulder over 0.7; fitted to one X-T4 sample, a guess).
 - **Thumbnails and EXIF** come from the JPEG the camera embeds in every RAF (`darkroom-core/src/raf.rs`), so an unedited RAF shows the camera's rendering in the grid, not Darkroom's. Once edited, its thumbnail is Darkroom's.
-- **Speed:** a 26 MP RAF takes a few seconds to open in a debug build. Each open develops it again; nothing is cached.
+- **Speed:** a 26 MP RAF takes about 4–5 s to open in a debug build. The look's apply runs on every core. Each open develops it again; nothing is cached.
 - **rawler in debug builds:** its demosaic relies on wrapping arithmetic, so the root `Cargo.toml` turns overflow checks off for that one package.
 
 ## Library
@@ -318,6 +321,7 @@ Made:
 - **GPU readback:** a thread per readback, results picked up in `poll`.
 - **Full-size export:** the whole image on the GPU, read back in strips.
 - **RAF decoder:** `rawler`, with its Markesteijn demosaic for X-Trans.
+- **RAF starting look:** the camera's settings, as rendered into the embedded JPEG: tone and chroma curves fitted per photo, black and white from the MakerNote.
 - **Detail reach:** in preview pixels, scaled per render.
 - **Undo model:** per-photo history in memory (`darkroom-core/src/history.rs`), whole edits, nothing in the edit file.
 - **Edited thumbnails:** rendered through the develop pipeline, once per edit, when the photo is left.
@@ -325,7 +329,6 @@ Made:
 
 Open:
 
-- **RAF starting look:** a curve per film simulation, or read the camera's settings from the MakerNote, or leave it flat.
 - **RAF preview:** cache the developed preview, or show the embedded JPEG first and swap.
 - **Exposure headroom:** values over white survive to the output step and are then mapped into SDR. An EDR preview would need a float display path.
 - **Thumbnail cache:** it lives in `~/Library/Caches/darkroom/thumbs` with no size limit or cleanup.

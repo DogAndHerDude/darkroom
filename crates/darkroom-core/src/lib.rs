@@ -4,6 +4,7 @@
 //! the crop, the rating and the flag. It lives in a [`sidecar`] file next to the photo; the
 //! original is never written.
 
+pub mod camera_look;
 pub mod curve;
 pub mod edit;
 pub mod exif;

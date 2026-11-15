@@ -5,9 +5,17 @@
 //! colour matrix. What comes out is
 //! linear sRGB-primary light at full precision, where a JPEG gives 8 encoded bits; the edit
 //! then runs on it like on any photo.
+//!
+//! The starting look is the camera's: a tone curve and chroma fitted against the JPEG the camera
+//! embedded (`darkroom_core::camera_look`), so an unedited RAF looks like its JPEG, film
+//! simulation and all, and its edit file stays empty. A file whose JPEG can't be used starts
+//! from a fixed base tone instead.
 
 use std::path::Path;
 
+use darkroom_core::camera_look::CameraLook;
+use darkroom_core::exif::Exif;
+use darkroom_core::raf;
 use image::{DynamicImage, Rgb32FImage, metadata::Orientation};
 use rawler::decoders::RawDecodeParams;
 use rawler::imgop::develop::{Intermediate, ProcessingStep, RawDevelop};
@@ -23,11 +31,19 @@ const STEPS: [ProcessingStep; 6] =
 
 /// Sensor data is exposed to protect highlights, so straight off the sensor a photo is about a
 /// stop darker than the camera's own JPEG. The gain brings middle grey to where the JPEG has it.
+/// Fitted to one X-T4 sample; only used when the camera's look can't be fitted.
 const BASE_GAIN: f32 = 1.8;
 /// Luminance above this rolls off towards white instead of clipping under the gain.
 const SHOULDER: f32 = 0.7;
+/// The long edge both images are shrunk to before the camera's look is fitted: plenty of pixels
+/// for every brightness, quick to sort.
+const FIT_EDGE: usize = 512;
+/// The middle part of each image, across and down, that the fit compares. The camera's JPEG is
+/// corrected for the lens and the raw isn't; the edges, where distortion and vignetting are
+/// strongest, would skew the comparison.
+const FIT_CENTRE: f32 = 0.6;
 
-/// The starting look for raw files: the base gain with a soft highlight shoulder, applied to
+/// The fallback starting look: the base gain with a soft highlight shoulder, applied to
 /// luminance so colours keep their hue. Everything stays recoverable by the edit.
 fn base_tone([r, g, b]: [f32; 3]) -> [f32; 3] {
     let [r, g, b] = [r.max(0.0), g.max(0.0), b.max(0.0)];
@@ -73,9 +89,23 @@ fn develop_inner(path: &Path) -> Result<DynamicImage, String> {
     let Intermediate::ThreeColor(rgb) = developed else { return Err("not a colour raw file".into()) };
     let (w, h) = (rgb.dim().w as u32, rgb.dim().h as u32);
     let mut data = rgb.flatten();
-    for px in data.as_chunks_mut::<3>().0 {
-        *px = base_tone(*px);
-    }
+    let look = camera_look(path, &data, w as usize, h as usize);
+    // Every pixel goes through Oklab and back: split across the cores.
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let chunk = (data.len() / 3).div_ceil(threads).max(1) * 3;
+    std::thread::scope(|s| {
+        for part in data.chunks_mut(chunk) {
+            let look = &look;
+            s.spawn(move || {
+                for px in part.as_chunks_mut::<3>().0 {
+                    *px = match look {
+                        Some(look) => look.apply(*px),
+                        None => base_tone(*px),
+                    };
+                }
+            });
+        }
+    });
     let buffer = Rgb32FImage::from_raw(w, h, data).ok_or("the developed image has the wrong size")?;
     let mut img = DynamicImage::ImageRgb32F(buffer);
     if let Some(o) = u8::try_from(raw.orientation.to_u16()).ok().and_then(Orientation::from_exif) {
@@ -84,9 +114,67 @@ fn develop_inner(path: &Path) -> Result<DynamicImage, String> {
     Ok(img)
 }
 
+/// The camera's look for this photo, fitted against the JPEG it embedded. `rgb` is the developed
+/// image, `w` × `h`, not yet turned upright, as the JPEG's pixels are stored. None when there is
+/// no JPEG, it frames the photo differently, or the fit isn't trusted.
+fn camera_look(path: &Path, rgb: &[f32], w: usize, h: usize) -> Option<CameraLook> {
+    let bytes = raf::embedded_jpeg(path)?;
+    let jpeg = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).ok()?.into_rgb8();
+    let (jw, jh) = (jpeg.width() as usize, jpeg.height() as usize);
+    if (jw as f32 / jh as f32 - w as f32 / h as f32).abs() > 0.01 {
+        return None;
+    }
+    let (fw, fh) = if w >= h { (FIT_EDGE, FIT_EDGE * h / w) } else { (FIT_EDGE * w / h, FIT_EDGE) };
+    let raw = centre(&shrink(|i| [rgb[3 * i], rgb[3 * i + 1], rgb[3 * i + 2]], w, h, fw, fh), fw, fh);
+    let decode: Vec<f32> = (0..=255u8).map(srgb_decode).collect();
+    let pixels = jpeg.as_raw();
+    let camera = centre(&shrink(|i| [pixels[3 * i], pixels[3 * i + 1], pixels[3 * i + 2]].map(|b| decode[b as usize]), jw, jh, fw, fh), fw, fh);
+    let black_and_white = Exif::read(path).look.is_some_and(|l| l.is_black_and_white());
+    let look = CameraLook::fit(&raw, &camera, black_and_white);
+    if std::env::var_os("DARKROOM_DEBUG").is_some() {
+        eprintln!("camera look: raw {w}×{h}, jpeg {jw}×{jh}, black and white {black_and_white}: {look:?}");
+    }
+    look
+}
+
+/// `w` × `h` pixels shrunk to `fw` × `fh`, each output pixel the mean of its box of input pixels.
+fn shrink(pixel: impl Fn(usize) -> [f32; 3], w: usize, h: usize, fw: usize, fh: usize) -> Vec<[f32; 3]> {
+    let mut sums = vec![[0.0f32; 4]; fw * fh];
+    for y in 0..h {
+        let row = y * fh / h * fw;
+        for x in 0..w {
+            let [r, g, b] = pixel(y * w + x);
+            let s = &mut sums[row + x * fw / w];
+            *s = [s[0] + r, s[1] + g, s[2] + b, s[3] + 1.0];
+        }
+    }
+    sums.into_iter().map(|[r, g, b, n]| [r / n, g / n, b / n]).collect()
+}
+
+/// The middle `FIT_CENTRE` of a `w` × `h` image, across and down.
+fn centre(pixels: &[[f32; 3]], w: usize, h: usize) -> Vec<[f32; 3]> {
+    let (cw, ch) = ((w as f32 * FIT_CENTRE) as usize, (h as f32 * FIT_CENTRE) as usize);
+    let (x0, y0) = ((w - cw) / 2, (h - ch) / 2);
+    (y0..y0 + ch).flat_map(|y| pixels[y * w + x0..y * w + x0 + cw].iter().copied()).collect()
+}
+
+/// An sRGB-encoded byte as linear light.
+fn srgb_decode(b: u8) -> f32 {
+    let v = b as f32 / 255.0;
+    if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shrinking_averages_each_box() {
+        // 4 × 2 to 2 × 1: each output pixel is the mean of a 2 × 2 box.
+        let px = [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [0.2, 0.4, 0.6], [0.2, 0.4, 0.6], [1.0, 1.0, 1.0], [0.0, 0.0, 0.0], [0.2, 0.4, 0.6], [0.2, 0.4, 0.6]];
+        let out = shrink(|i| px[i], 4, 2, 2, 1);
+        assert_eq!(out, vec![[0.5; 3], [0.2, 0.4, 0.6]]);
+    }
 
     #[test]
     fn the_base_tone_lifts_midtones_and_keeps_highlights_under_white() {

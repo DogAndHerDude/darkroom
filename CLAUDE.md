@@ -66,6 +66,7 @@ Priorities, in the user's words: RGB curves, and the Apple Photos-style basics (
 - One dark theme. Fonts are Rubik and DM Mono; accent `#e2a27a`.
 - Working space is linear Rec.2020 in `Rgba16Float`; curves run on display (sRGB-primary) channels; out-of-gamut colour is brought in by reducing Oklab chroma (the amount comes from a straight line in linear RGB; searching along the Oklab chroma line made a step in blues).
 - RAF is decoded with `rawler`, using its Markesteijn demosaic for X-Trans.
+- A RAF starts in the camera's look: tone and chroma curves fitted per photo against its embedded JPEG (by distribution, since the JPEG is lens-corrected and the raw isn't), baked in at decode; black and white comes from the MakerNote.
 
 ### Workspace
 
@@ -197,5 +198,5 @@ The user tests the native folder picker and their own camera files by hand; head
 
 - At 100% a second, full-size `Develop` lives in the compositor (`Preview.full`); its memory and slider speed are unmeasured.
 - An edited photo's thumbnail is made again only when the photo is left, and a pipeline change doesn't refresh thumbnails already cached (delete `~/Library/Caches/darkroom/thumbs/*.edit.*`).
-- The RAF starting look is a base tone fitted to one X-T4 sample, with no film simulation.
+- The RAF starting look fits tone and chroma, not hue: a Velvia sample's reds come out magenta where the camera's are orange. No black-and-white or DR200/400 RAF has been tried.
 - Presets work in Develop only, with no design yet. No before/after split yet; paste takes all sections. The Library has no status line, so a failure there shows only in Develop's panel.
