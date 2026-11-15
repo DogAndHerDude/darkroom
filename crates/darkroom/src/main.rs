@@ -4,6 +4,8 @@
 //! `cargo run -p darkroom` opens the folder chosen last time (or asks for one).
 //! `cargo run -p darkroom -- path/to/folder` browses that folder; `-- path/to/photo.jpg` opens a
 //! photo in Develop. `DARKROOM_NO_PREFS=1` ignores and keeps no saved settings (for tests).
+// A Windows release opens no console window beside the app's own.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod crop;
 mod curves;

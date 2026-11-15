@@ -91,6 +91,7 @@ Where things live in the app crate:
 
 - Rust is pinned (`rust-toolchain.toml`, RUNE's version). Don't change it independently of RUNE.
 - RUNE is pinned to a `dev` rev with `features = ["native-file-dialog"]`, and four crates are patched from the same rev (winit, parley_engine, wgpu-hal, accesskit_windows). Bump all five together. `wgpu` is pinned to RUNE's version so our resources live on RUNE's device.
+- Releases: `scripts/tag.sh` bumps the version and tags; a pushed tag runs `.github/workflows/release.yml`, which calls `scripts/build.sh` on macOS, Linux and Windows. Keep the build steps in `build.sh`, not in the workflow, so a local build and CI do the same thing. The scripts run on macOS's bash 3.2.
 - Dependencies build at `opt-level = 2` in dev (image decoding is unusable otherwise). `rawler` builds at 3 with overflow checks off: its demosaic relies on wrapping arithmetic and panics with checks on.
 
 ## Things you need to know to change the code

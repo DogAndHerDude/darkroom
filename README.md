@@ -45,6 +45,7 @@ Phase: **implementation.** Every v1 area has a working first version. What follo
 | Filmstrip | In Develop, with ← → |
 | First launch | Choose a root folder; remembered |
 | Export | JPEG, PNG, 16-bit TIFF; long-edge resize; sRGB or Display P3 with ICC profile; camera info without location; one photo, the Library's selection, or everything shown; progress and failures listed |
+| Releases | `scripts/tag.sh` bumps the version, tests, commits and tags; a pushed tag builds macOS, Linux and Windows packages on GitHub Actions and publishes them as a release (see "Releasing") |
 | RAF | Developed with `rawler` to linear floats; thumbnails and EXIF from the embedded JPEG |
 
 ### Not built
@@ -90,6 +91,7 @@ Design column: ✅ designed on the canvas · ◐ partly · ✗ not designed · n
 - **Edited thumbnails lag the edit:** a thumbnail is made again when you open another photo or leave Develop, not while you edit, and each time decodes the whole file (a RAF is developed again, a few seconds). A change to the pipeline's code doesn't refresh thumbnails already cached. A photo edited and then reset leaves its old edited thumbnail in the cache, unused.
 - **Presets are Develop only and undesigned:** built without a design, in the panel's style. No applying a preset to the Library's selection, no rename, no updating a preset with a new look (delete and save again), no folders of presets. The folder is read at launch and after a save or delete, so a file added in Finder shows on the next launch. A deleted preset is gone (no undo, no Trash). A preset file that doesn't parse is skipped and named in the status line, and only the first such file is named. Preset files are written in full, like edit files. The section sits below Detail, so it is off screen until the panel is scrolled.
 - **Folder watching leaves the open photo alone:** a photo open in Develop that is replaced on disk keeps showing the old pixels until it is opened again; one that is deleted stays open, and editing it writes an edit file for a photo that is gone. Edit files changed by another app (a sync, another Mac) aren't picked up until the folder is opened again, since Darkroom's own saves are ignored by name. Every change reads the whole folder again (EXIF and edit file of every photo) and scans the whole tree; untimed on a large folder or tree. A photo still being copied may get no thumbnail until the copy's last change comes in. A watch that can't start says so in the status line only (which the Library doesn't show).
+- **Linux and Windows builds are macOS-shaped:** exports there carry no ICC profile (it is read from `/System/Library/ColorSync`), so a Display P3 export is mislabelled as untagged; the thumbnail cache and presets go under `$HOME/Library/...` (on Windows, where `HOME` is usually unset, into the temp folder); the top bar leaves room for macOS's traffic lights. Releases are unsigned on every platform.
 - **Verbose edit files:** reading is sparse (missing fields are neutral), but saving writes every field, so a rating alone produces a full file.
 - **Preview is 8-bit sRGB:** RUNE has no known path for high-bit-depth or P3 output of app-supplied images. Processing is float and exports are unaffected.
 - **TIFF exports carry no camera info.**
@@ -112,6 +114,7 @@ Everything was built against generated test images and one downloaded X-T4 RAF.
 - Thumbnail speed on a folder of 26–40 MP files (first visit decodes each one)
 - Noise reduction at full size on a noisy high-ISO photo (the taps are spread apart for export; only seen on ISO 160)
 - Slider drag speed with noise reduction on (81 taps per pixel)
+- The release workflow on GitHub, and the Windows build at all: `build.sh` ran on this Mac (universal app; both architectures launched) and in a Debian container (an aarch64 Linux binary, not run); `tag.sh` ran against a scratch clone and bare repo, including a failing clippy. The Linux and Windows apps have never been opened
 - Folder watching with a Finder copy, a card import, an external or network drive, or a large folder: `cp`, `mkdir` and `rm` from a shell on four generated PNGs only
 - Presets from a real keyboard and mouse, and in the real `~/Library/Application Support`: scripted clicks and typing in a scratch home only, on the test chart and one generated PNG
 - Exported capture time and lens info as other apps read them
@@ -136,6 +139,25 @@ cargo test --workspace
 The toolchain is pinned to Rust 1.99.1 (RUNE's), so rustup installs it on the first build.
 
 RUNE is pinned to a `dev` rev in the root `Cargo.toml`, with the four crates RUNE patches patched from the same rev. Bump all five together. `wgpu` is pinned to RUNE's version (`~30.0.1`) so our resources live on RUNE's device.
+
+## Releasing
+
+```sh
+scripts/tag.sh --dry-run          # what the next tag would be
+scripts/tag.sh                    # bump the patch version, test, commit "Release vX.Y.Z", tag it
+scripts/tag.sh minor --push       # bump minor (or major), and push the commit and tag
+scripts/build.sh                  # a release build for this machine only, into dist/
+```
+
+`tag.sh` needs a clean tree on `main`. It counts up from the newer of `Cargo.toml`'s version and the latest `vX.Y.Z` tag, sets `[workspace.package] version`, refreshes `Cargo.lock`, and runs the tests and clippy (`-D warnings`) before committing; if they fail it puts `Cargo.toml` back and tags nothing. Without `--push` it prints the push command.
+
+A pushed `vX.Y.Z` tag starts `.github/workflows/release.yml`: `scripts/build.sh` runs on a macOS, a Linux and a Windows runner, and the three packages become that tag's GitHub release. The workflow refuses a tag that doesn't match `Cargo.toml`. Run by hand from the Actions tab, it builds the packages as artifacts without a release.
+
+| Platform | Package |
+| --- | --- |
+| macOS | `darkroom-X.Y.Z-macos-universal.zip`: `Darkroom.app` for Apple silicon and Intel, macOS 11 or later, ad-hoc signed (no Developer ID, not notarized, no icon) |
+| Linux | `darkroom-X.Y.Z-linux-x86_64.tar.gz`: the binary; links libxkbcommon, and glibc no older than the runner's (Ubuntu 24.04) |
+| Windows | `darkroom-X.Y.Z-windows-x86_64.zip`: `darkroom.exe` |
 
 ## Workspace
 
