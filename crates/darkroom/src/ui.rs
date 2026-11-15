@@ -112,6 +112,11 @@ pub fn before_after_icon(color: Color) -> Shape {
     Shape::new().stroke_path(&frame, 1.5, LineCap::Round, color).stroke(vec![[10.0, 2.5], [10.0, 17.5]], 1.5, color).view_box(20.0, 20.0)
 }
 
+/// A cross in a 20 × 20 box: removes something. Not in the design system yet.
+pub fn cross_icon(color: Color) -> Shape {
+    Shape::new().stroke(vec![[6.0, 6.0], [14.0, 14.0]], 1.5, color).stroke(vec![[14.0, 6.0], [6.0, 14.0]], 1.5, color).view_box(20.0, 20.0)
+}
+
 /// The design's undo arrow in a 20 × 20 box: an arrowhead at the left of a line that hooks
 /// round and back underneath. `mirror` flips it into redo.
 fn hook_arrow(mirror: bool, color: Color) -> Shape {

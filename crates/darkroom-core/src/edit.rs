@@ -56,6 +56,13 @@ impl Edit {
     pub fn paste_look(&mut self, from: &Edit) {
         (self.light, self.color, self.curves, self.detail) = (from.light.clone(), from.color.clone(), from.curves.clone(), from.detail.clone());
     }
+
+    /// Only what a paste or a preset carries; crop, rating and flag neutral.
+    pub fn look(&self) -> Edit {
+        let mut look = Edit::default();
+        look.paste_look(self);
+        look
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

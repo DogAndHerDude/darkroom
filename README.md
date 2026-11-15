@@ -31,6 +31,7 @@ Phase: **implementation.** Every v1 area has a working first version. What follo
 | Sections | The eye icon hides or shows a section's edits; Reset all |
 | Before/after | The original while `\` is held, or toggled with the top-bar button |
 | Copy/paste edits | "Copy edits" and "Paste" under the panel in Develop, or ⇧⌘C and ⇧⌘V there and in the Library, where paste goes onto every selected photo. Paste replaces Light, Color, Curves and Detail and keeps each photo's own crop, rating and flag; one undo step a photo |
+| Presets | The Presets section at the bottom of Develop's panel: "Save preset…" keeps the photo's Light, Color, Curves and Detail under a typed name (Return saves, Esc cancels; a taken or unusable name says why under the field); a click on a name puts that look on the photo as one undo step, keeping its crop, rating and flag; the preset matching the photo's look is lit; the cross deletes after a confirm. Kept as one TOML file each in `~/Library/Application Support/darkroom/presets`, never overwritten |
 | Undo/redo | ⌘Z and ⇧⌘Z, or the arrows in the top bar, in Develop. One step per finished change (a slider drag, a curve point, a crop, a reset); each photo keeps its steps until the app quits |
 | Histogram | Live from the GPU, at the top of the panel, with the photo's aperture, shutter, ISO and focal length under it |
 | Clipping warnings | The histogram's two squares paint crushed shadows blue and blown highlights red over the photo. Preview only; exports never carry them |
@@ -52,7 +53,6 @@ In the spec or the designs, with no code yet.
 | Feature | Design | Notes |
 | --- | --- | --- |
 | Paste with a choice of sections | ✗ | Paste always takes all four sections |
-| Presets | ✗ | |
 | Before/after split view | ✗ | The held key and the toggle are built |
 | Film simulation under the photo's name in Develop | ✅ | The design's top bar reads "Classic Chrome · 4 of 248"; only the name is shown |
 | Folder watching | n/a | New photos appear after reopening the folder |
@@ -88,6 +88,7 @@ Design column: ✅ designed on the canvas · ◐ partly · ✗ not designed · n
 - **Ratings, flags and paste on many photos run in the click or key handler:** each photo's edit file is read and written there, one after another. Untimed beyond six photos.
 - **Clipping warnings are a rule of thumb:** highlights warn when any channel shows at 255, shadows only when all three show at 0. A fully saturated colour therefore warns as a highlight (the test chart's hue bars do). The test reads the pixel as drawn, so at Fit a clipped speck smaller than a screen pixel can go unmarked. There is no shortcut key and no count of clipped pixels.
 - **Edited thumbnails lag the edit:** a thumbnail is made again when you open another photo or leave Develop, not while you edit, and each time decodes the whole file (a RAF is developed again, a few seconds). A change to the pipeline's code doesn't refresh thumbnails already cached. A photo edited and then reset leaves its old edited thumbnail in the cache, unused.
+- **Presets are Develop only and undesigned:** built without a design, in the panel's style. No applying a preset to the Library's selection, no rename, no updating a preset with a new look (delete and save again), no folders of presets. The folder is read at launch and after a save or delete, so a file added in Finder shows on the next launch. A deleted preset is gone (no undo, no Trash). A preset file that doesn't parse is skipped and named in the status line, and only the first such file is named. Preset files are written in full, like edit files. The section sits below Detail, so it is off screen until the panel is scrolled.
 - **Verbose edit files:** reading is sparse (missing fields are neutral), but saving writes every field, so a rating alone produces a full file.
 - **Preview is 8-bit sRGB:** RUNE has no known path for high-bit-depth or P3 output of app-supplied images. Processing is float and exports are unaffected.
 - **TIFF exports carry no camera info.**
@@ -110,6 +111,7 @@ Everything was built against generated test images and one downloaded X-T4 RAF.
 - Thumbnail speed on a folder of 26–40 MP files (first visit decodes each one)
 - Noise reduction at full size on a noisy high-ISO photo (the taps are spread apart for export; only seen on ISO 160)
 - Slider drag speed with noise reduction on (81 taps per pixel)
+- Presets from a real keyboard and mouse, and in the real `~/Library/Application Support`: scripted clicks and typing in a scratch home only, on the test chart and one generated PNG
 - Exported capture time and lens info as other apps read them
 - Display P3 exports viewed on a P3 screen
 
@@ -121,7 +123,7 @@ cargo run -p darkroom -- path/to/folder          # browse a folder (not remember
 cargo run -p darkroom -- path/to/photo.jpg       # open a photo in Develop (or a .RAF)
 cargo run -p darkroom -- --snap out.png --scene edited   # headless snapshot, no window
 # DARKROOM_NO_PREFS=1 ignores saved settings (root folder, thumbnail size), for tests
-# Develop scenes on the test chart: develop, edited, curves, curve-red, extreme, warm, hidden, original, clipping, definition, sharpen, denoise, crop, cropped, zoom, picking
+# Develop scenes on the test chart: develop, edited, curves, curve-red, extreme, warm, hidden, original, clipping, definition, sharpen, denoise, crop, cropped, zoom, picking, presets
 # (the detail scenes need a photo with texture and noise to show anything)
 # the panel scrolls; for the Curves section in a snapshot add --size 1280x1500
 # drive it: --script events.json (clicks and drags in window points, or "key": an element's key)
@@ -270,14 +272,14 @@ So the preview never leaves the GPU, and processing stays in float until the fin
 - The info panel with several photos selected (built showing the photo clicked last), and copy and paste in the Library (shortcuts only)
 - The export dialog's "Selected" option (built into the existing Photos control)
 - Clipping overlay on the photo (built as flat `clip-shadow` and `clip-highlight` over the clipped pixels)
-- Presets: list, save, apply
+- Presets: list, save, apply, delete (built as a section under Detail: name rows, the lit row for the photo's look, an inline name field, an inline delete confirm)
 - Paste edits with a choice of sections
 - White balance picker in use on the photo
 - Error and warning states: unreadable file, missing folder or drive
 - RAF-specific UI: true white balance in Kelvin, anything decoder-specific
 - RAF + JPEG pairs in the grid
 - Keyboard shortcut list; settings, if any are needed
-- New icons to add to the design system: eyedropper, folder, flip, swap orientation
+- New icons to add to the design system: eyedropper, folder, flip, swap orientation, cross (deletes a preset)
 
 ### Decisions
 

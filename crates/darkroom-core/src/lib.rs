@@ -11,6 +11,7 @@ pub mod fuji;
 pub mod geometry;
 pub mod history;
 pub mod library;
+pub mod preset;
 pub mod raf;
 pub mod sidecar;
 

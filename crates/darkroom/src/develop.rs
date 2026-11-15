@@ -8,7 +8,7 @@ use rune::{Cursor, Drag, El, Key, KeyEvent, Phase, PointerEvent, ScrollSpec, Sur
 use crate::curves::Picker;
 use crate::theme as t;
 use crate::ui::{before_after_icon, button, divider, eye_icon, eyedropper_icon, icon_button, icon_toggle, redo_icon, rule, segmented, stars, top_bar, undo_icon};
-use crate::{Module, PHOTO_SLOT, State, crop, curves};
+use crate::{Module, PHOTO_SLOT, State, crop, curves, presets};
 
 /// Slider track width: the 300 pt panel less its 12 pt padding on each side.
 const TRACK: f32 = 276.0;
@@ -222,7 +222,12 @@ impl State {
 
     /// Puts the copied look on the open photo, as one undo step.
     pub fn paste_edits(&mut self) {
-        let Some(from) = &self.copied else { return };
+        let Some(from) = self.copied.clone() else { return };
+        self.put_look(&from);
+    }
+
+    /// Puts `from`'s look (a copied edit or a preset) on the open photo, as one undo step.
+    pub fn put_look(&mut self, from: &Edit) {
         self.edit.paste_look(from);
         // A selected curve point may not exist on the pasted curves.
         (self.curve_point, self.curve_removing) = (None, false);
@@ -359,6 +364,7 @@ pub fn view(s: &State, inset: f32) -> El {
             .child(section("color", "Color", e.color.enabled, |e| e.color.enabled = !e.color.enabled, Some(neutral_picker(s)), sliders(&COLOR, s)))
             .child(section("curves", "Curves", e.curves.enabled, |e| e.curves.enabled = !e.curves.enabled, None, curves::body(s)))
             .child(section("detail", "Detail", e.detail.enabled, |e| e.detail.enabled = !e.detail.enabled, None, sliders(&DETAIL, s)))
+            .child(presets::section(s))
     };
 
     let tools = segmented("tool", &[(false, "Adjust"), (true, "Crop")], s.cropping, |s, on| s.set_cropping(on));

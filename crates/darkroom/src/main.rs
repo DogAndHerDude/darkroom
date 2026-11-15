@@ -12,6 +12,7 @@ mod export;
 mod jobs;
 mod library;
 mod photo;
+mod presets;
 mod raw;
 mod theme;
 mod ui;
@@ -22,6 +23,7 @@ use std::sync::Arc;
 
 use darkroom_core::library::{Entry, Filter, Folder, Selection, Sort};
 use darkroom_core::geometry::{self, Affine};
+use darkroom_core::preset::Preset;
 use darkroom_core::{Channel, Curve, Edit, Flag, History, sidecar};
 use darkroom_render::{Develop, Histogram, Placement, Results};
 use rune::compose::DeviceKey;
@@ -84,6 +86,14 @@ struct State {
     show_original: bool,
     /// The edit taken by "Copy edits", for Paste. Kept until the app quits.
     copied: Option<Edit>,
+    /// Saved looks, by name, and the folder they are kept in.
+    presets: Vec<Preset>,
+    presets_dir: PathBuf,
+    /// A new preset's name is being typed, in this field.
+    naming_preset: bool,
+    preset_name: TextEdit,
+    /// The preset whose Delete is waiting to be confirmed.
+    preset_deleting: Option<String>,
     /// The last save's or open's outcome, shown in the panel.
     status: String,
     /// The curve the Curves section shows.
@@ -535,6 +545,11 @@ fn init() -> State {
         histories: HashMap::new(),
         show_original: false,
         copied: None,
+        presets: Vec::new(),
+        presets_dir: presets::dir(),
+        naming_preset: false,
+        preset_name: TextEdit::new(""),
+        preset_deleting: None,
         status: String::new(),
         curve_channel: Channel::Rgb,
         curve_point: None,
@@ -570,6 +585,7 @@ fn init() -> State {
     };
     s.export_settings = s.prefs.get("export").unwrap_or_default();
     s.thumb_size = s.prefs.get("thumb_size").unwrap_or(s.thumb_size).clamp(library::THUMB_MIN, library::THUMB_MAX);
+    s.load_presets();
 
     match rune::tooling::extra_args().first().map(PathBuf::from) {
         Some(dir) if dir.is_dir() => s.set_root(dir, false),
@@ -660,8 +676,8 @@ fn poll(s: &mut State, _t: f64, _tx: &mut Tx) -> bool {
 /// onto every selected photo, which ratings and flags go to as well; ⌘A there selects all the
 /// grid shows. In Develop `\` shows the original while it is held (`key_up` ends it).
 fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
-    // Typing a slider's value: every key is the field's.
-    if s.entry.is_some() {
+    // Typing a slider's value or a preset's name: every key is the field's.
+    if s.entry.is_some() || (s.naming_preset && s.preset_name.focused) {
         return false;
     }
     if ev.is_command('z') && s.module == Module::Develop && s.export_scope.is_none() && s.export_run.is_none() {
@@ -972,6 +988,20 @@ fn main() {
                 develop_scene(s);
                 s.edit.light.exposure = 1.0;
                 s.edit.light.enabled = false;
+            }),
+            // Three presets (in memory only), the photo wearing the second.
+            ("presets", |s: &mut State| {
+                develop_scene(s);
+                let mut look = Edit::default();
+                s.presets = ["Bright and airy", "Faded film", "Warm evening with a much longer name than fits"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, name)| {
+                        (look.light.exposure, look.color.temperature) = (0.2 * i as f32, 15.0 * i as f32);
+                        Preset { name: name.into(), look: look.clone() }
+                    })
+                    .collect();
+                s.edit = s.presets[1].look.clone();
             }),
         ],
         ..AppSpec::new("Darkroom", (1440.0, 900.0), init, view)
