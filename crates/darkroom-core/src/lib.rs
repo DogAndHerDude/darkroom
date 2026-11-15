@@ -7,6 +7,7 @@
 pub mod curve;
 pub mod edit;
 pub mod exif;
+pub mod fuji;
 pub mod geometry;
 pub mod history;
 pub mod library;

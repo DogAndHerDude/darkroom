@@ -281,7 +281,8 @@ mod tests {
         s.toggle("d".into());
         assert_eq!(selected(&s, &order), "c*", "the photo added before takes over");
         s.toggle("c".into());
-        assert!(s.is_empty() && s.len() == 0);
+        assert!(s.is_empty());
+        assert_eq!(s.len(), 0);
     }
 
     #[test]

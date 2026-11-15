@@ -37,6 +37,7 @@ Phase: **implementation.** Every v1 area has a working first version. What follo
 | Edited thumbnails | The grid, the info panel and the filmstrip show an edited photo as edited, crop included; made again when you leave the photo |
 | Crop | Aspect presets (Free, Original, 1:1, 4:5, 16:9), straighten ±45°, rotate 90°, flip; applied in preview and export |
 | Library | Folder tree, thumbnail grid with disk cache, show All/Picks/Rejects, minimum rating, sort by time or name, thumbnail size, info panel with EXIF |
+| Film simulation | The info panel shows a Fujifilm photo's simulation, grain effect, color chrome, dynamic range and white balance, read from the camera's MakerNote (JPEG, or a RAF's embedded JPEG). Shown only; it doesn't change how the photo is developed |
 | Multi-select | In the grid: ⌘-click adds a photo or takes it out, ⇧-click selects the range from the photo clicked before, ⌘A selects all shown. Ratings, flags, paste and export act on the whole selection; the info panel shows the photo clicked last |
 | Ratings and flags | In the Library and Develop, by click or key |
 | Filmstrip | In Develop, with ← → |
@@ -53,7 +54,7 @@ In the spec or the designs, with no code yet.
 | Paste with a choice of sections | ✗ | Paste always takes all four sections |
 | Presets | ✗ | |
 | Before/after split view | ✗ | The held key and the toggle are built |
-| Fuji film simulation in the info panel | ✅ | Needs Fujifilm MakerNote parsing |
+| Film simulation under the photo's name in Develop | ✅ | The design's top bar reads "Classic Chrome · 4 of 248"; only the name is shown |
 | Folder watching | n/a | New photos appear after reopening the folder |
 | Missing folder or drive, unreadable file | ✗ | Failures show as a line of status text only |
 | Export file naming | ✅ | Files keep the photo's name; no template |
@@ -74,6 +75,7 @@ Design column: ✅ designed on the canvas · ◐ partly · ✗ not designed · n
 - **Local tone keeps fine texture, not everything:** detail about the size of the window or larger (broad clouds) counts as region and is still flattened, as the old global curves did. A region pushed more than halfway to black or white has its detail compressed too. Brightness and Contrast stay global.
 - **Local tone speed is unmeasured:** five extra quarter-size passes per edit change while Brilliance, Highlights or Shadows are set, and five more for Definition. Not timed on a 26 MP photo or during a drag.
 - **Sharpening raises noise** in flat areas (sd 7 → 11 at 80 on the noisy test image). Wants a masking control.
+- **Film simulation names are mostly unseen:** the tag numbers and values come from ExifTool's Fujifilm table, and the names are written as the X series' menus have them, from memory ("Shade", "Fluorescent 1", "Auto, ambience priority", "Eterna Bleach Bypass"). Only one camera file was read (an X-T4: Provia, grain off, color chrome off, DR100, auto white balance); every other value was seen only on a copy of that file with the numbers changed by hand. A value not in the table shows no row. Color Chrome FX Blue, a Kelvin white balance's number and the older cameras' portrait modes aren't shown. The info panel's label column is 88 pt, set so "Dynamic range" and the exposure line both fit; a longer lens name or exposure line would run out of the panel.
 - **RAF look:** no film simulation, and a base tone fitted to one X-T4 sample. A RAF starts flatter and less saturated than its JPEG.
 - **RAF speed:** a few seconds to open (debug build), developed again on every open.
 - **RAF hot pixels:** isolated bright pixels at 100%; the camera maps them out, nothing here does.
@@ -103,6 +105,7 @@ Everything was built against generated test images and one downloaded X-T4 RAF.
 - The top bar beside the real traffic lights, and in full screen: checked only against RUNE's headless overlay of where macOS draws them
 - Edited thumbnails of a RAF, and of a folder with many edited photos (each is decoded in full first): three generated PNGs so far. The filmstrip's refresh after moving to the next photo wasn't looked at on its own
 - Clipping warnings on a real photo and at 100%: the test chart at Fit only
+- Film simulation on the user's own cameras and settings: one downloaded X-T4 RAF and its embedded JPEG so far
 - ⌘-click, ⇧-click and ⌘A from a real mouse and keyboard: scripted clicks with held modifiers only, on six generated PNGs
 - Thumbnail speed on a folder of 26–40 MP files (first visit decodes each one)
 - Noise reduction at full size on a noisy high-ISO photo (the taps are spread apart for export; only seen on ISO 160)

@@ -6,6 +6,8 @@ use std::path::Path;
 
 use exif::{In, Tag, Value};
 
+use crate::fuji::Look;
+
 /// Shooting details, each present only if the file has it. Display strings follow the design
 /// system's number style: ƒ/2.8, 1/250 s, ISO 400, 23 mm.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -18,6 +20,8 @@ pub struct Exif {
     pub shutter: Option<String>,
     pub iso: Option<String>,
     pub focal_length: Option<String>,
+    /// The film simulation and its settings, from a Fujifilm camera.
+    pub look: Option<Look>,
 }
 
 impl Exif {
@@ -48,6 +52,7 @@ impl Exif {
             shutter: field(Tag::ExposureTime).and_then(rational).map(shutter),
             iso: field(Tag::PhotographicSensitivity).and_then(|v| v.get_uint(0)).map(|n| format!("ISO {n}")),
             focal_length: field(Tag::FocalLength).and_then(rational).map(|f| format!("{} mm", trim(f, 0))),
+            look: field(Tag::MakerNote).and_then(|v| if let Value::Undefined(note, _) = v { Look::read(note) } else { None }),
         }
     }
 

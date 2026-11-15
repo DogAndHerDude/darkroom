@@ -214,9 +214,16 @@ fn info(s: &State) -> El {
     let mut details = col().w_full().gap(6.0);
     for (label, value) in [("Taken", x.taken.as_deref().map(taken)), ("Camera", x.camera.clone()), ("Lens", x.lens.clone()), ("Exposure", Some(x.exposure_line()).filter(|l| !l.is_empty()))] {
         if let Some(value) = value {
-            details = details.child(row().w_full().gap(8.0).child(text(label).font(t::LABEL).color(t::INK_MUTED).w(72.0)).child(text(value).font(t::LABEL).color(t::INK).shrink()));
+            details = details.child(detail(label, value));
         }
     }
+    let look = x.look.as_ref().map(|look| {
+        let mut rows = col().w_full().gap(6.0).child(text("Film simulation").font(t::BODY_STRONG).color(t::INK));
+        for (label, value) in look.rows() {
+            rows = rows.child(detail(label, value.to_owned()));
+        }
+        col().w_full().gap(12.0).child(rule()).child(rows)
+    });
     let open = e.path.clone();
     panel
         .child(image)
@@ -224,11 +231,17 @@ fn info(s: &State) -> El {
         .child(row().w_full().center_y().child(rating).child(spacer()).child(flags))
         .child(rule())
         .child(details)
+        .children(look)
         .child(spacer())
         .child(button("edit-in-develop", "Edit in Develop", move |s| {
             s.open(open.clone());
             s.module = crate::Module::Develop;
         }))
+}
+
+/// One line of the info panel's details: a muted label and its value.
+fn detail(label: &'static str, value: String) -> El {
+    row().w_full().gap(8.0).child(text(label).font(t::LABEL).color(t::INK_MUTED).w(88.0)).child(text(value).font(t::LABEL).color(t::INK).shrink())
 }
 
 /// "2026:11:09 17:42:11" → "9 Nov 2026, 17:42".

@@ -71,7 +71,7 @@ Priorities, in the user's words: RGB curves, and the Apple Photos-style basics (
 
 | Crate | What | Depends on |
 | --- | --- | --- |
-| `crates/darkroom-core` | Edit model, curves, geometry, undo history, sidecars, library scan and filters, EXIF, RAF header | No GPU, no UI. Keep it that way |
+| `crates/darkroom-core` | Edit model, curves, geometry, undo history, sidecars, library scan and filters, EXIF, the Fujifilm look (MakerNote), RAF header | No GPU, no UI. Keep it that way |
 | `crates/darkroom-render` | The GPU develop pipeline (WGSL compute passes), readback, present, export render | core, wgpu |
 | `crates/darkroom` | The app: RUNE UI, state, background jobs, raw decoding, file export | both |
 
