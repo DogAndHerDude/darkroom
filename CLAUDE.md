@@ -199,4 +199,4 @@ The user tests the native folder picker and their own camera files by hand; head
 - At 100% a second, full-size `Develop` lives in the compositor (`Preview.full`); its memory and slider speed are unmeasured.
 - An edited photo's thumbnail is made again only when the photo is left, and a pipeline change doesn't refresh thumbnails already cached (delete `~/Library/Caches/darkroom/thumbs/*.edit.*`).
 - The RAF starting look fits tone and chroma, not hue: a Velvia sample's reds come out magenta where the camera's are orange. No black-and-white or DR200/400 RAF has been tried.
-- Presets work in Develop only, with no design yet. Paste takes all sections. The Library has no status line, so a failure there shows only in Develop's panel.
+- Presets work in Develop only. Paste takes all sections (the design has a choice). Several states were drawn after they were built and differ from the app; README "Designs not followed exactly" lists them. The Library has no status line, so a failure there shows only in Develop's panel.

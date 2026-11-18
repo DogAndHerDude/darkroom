@@ -55,13 +55,17 @@ In the spec or the designs, with no code yet.
 
 | Feature | Design | Notes |
 | --- | --- | --- |
-| Paste with a choice of sections | ✗ | Paste always takes all four sections |
+| Paste with a choice of sections | ✅ | Paste always takes all four sections; the design's "Paste…" opens a popover with a switch per section |
 | Film simulation under the photo's name in Develop | ✅ | The design's top bar reads "Classic Chrome · 4 of 248"; only the name is shown |
-| Missing folder or drive, unreadable file | ✗ | Failures show as a line of status text only |
+| Missing folder or drive, unreadable file | ✅ | Failures show as a line of status text only; the designs use the Alert component in the grid and on the stage, and mark the folder and thumbnail |
+| The Library's status line | ✅ | A line under the grid saying what the last rating, flag or paste did |
+| RAF white balance in kelvin | ✅ | Temperature on a RAF reads in kelvin from the camera's as-shot value, with an "As shot" reset; a JPEG keeps −100…+100 |
+| RAF + JPEG pairs as one photo | ✅ | One grid cell with a "RAF + JPG" tag; Develop edits the RAF |
 | Export file naming | ✅ | Files keep the photo's name; no template |
 | Bundled fonts (Rubik, DM Mono) | n/a | The design system ships `.woff2`; unknown whether RUNE loads it |
 | Theme generated from `tokens.json` | n/a | `theme.rs` is converted by hand |
-| Keyboard shortcut list, settings screen | ✗ | |
+| Keyboard shortcut list | ✅ | A dialog opened with `?` (the key is an assumption of the design) |
+| Settings screen | n/a | Nothing needs one yet |
 
 Design column: ✅ designed on the canvas · ◐ partly · ✗ not designed · n/a nothing to design.
 
@@ -70,7 +74,7 @@ Design column: ✅ designed on the canvas · ◐ partly · ✗ not designed · n
 - **Out-of-gamut colour:** the hard step in saturated blues is gone (largest neighbour step on a generated blue chart went from 38 levels to 3 or less at moderate settings). Hue and lightness are kept in Oklab, but how much chroma survives is read off a straight line in linear RGB, and a small residual is removed along that line, so it is not the nearest in-gamut colour. At Saturation +100 the blue-to-white ramp has a crease in its slope (no step). In Display P3 exports of the same chart the largest step between neighbouring source levels is 6 to 8 levels, where a channel reaches zero at the gamut edge (a steep toe, not the old jump). Generated charts only, not a real photo.
 - **100% view:** a second full-size pipeline lives on the GPU while a photo is open at 100% (the source plus three `Rgba16Float` textures; roughly 0.7 GB for 26 MP, a guess from the texture sizes, not measured). Slider speed at 100% is unmeasured. Until the full size has decoded, the preview is shown enlarged. The histogram and pickers still read the 2560 px preview. An unedited photo matches its source exactly, and an edited one (Brilliance, Highlights, Shadows, Definition) matches its full-size sRGB export exactly.
 - **Neutral-point picker:** Temperature and Tint only reach ±0.3 and ±0.25 stops, so a strong cast is clamped at ±100 and only partly removed. It reads a 5×5 mean of the source pixels, ignoring the other adjustments.
-- **Designs not followed exactly:** Copy edits, Paste and Reset all use the raised button, not the design's quiet one; the before/after button is the small icon button, the design's is the regular size; the clipping squares sit in an 18 pt press area, larger than the design's 10 pt square; the 100% view, the neutral picker in use and the lit eye of a hidden section are not on the canvas (see "Designs still to draw").
+- **Designs not followed exactly:** Copy edits, Paste and Reset all use the raised button, not the design's quiet one; the before/after button is the small icon button, the design's is the regular size; the clipping squares sit in an 18 pt press area, larger than the design's 10 pt square. Drawn after they were built, and differing from them: the split view's line has a round grip in the middle, and its tags sit in a dark pill; the 100% view's "Loading the full size…" note is a pill over the photo with a spinner, where the app puts plain text above it; a hidden section's eye is crossed through, with "Hidden" beside it and its title dimmed, where the app only lights the eye; presets are saved from a + in the section header, the photo's look is marked with a tick, the delete confirm says "Keep" or "Delete", and a taken name reads "There's already a preset with that name."; Paste with nothing copied is the faint quiet button; the Library's info panel with several selected says "3 photos selected" over a stack of them, with "Mixed" values, rating and flag for all, and Paste and Copy buttons, where the app shows the photo clicked last; the export dialog's finished state has a tick and names any file that got " (2)", and failures are an Alert, where the app lists them as red lines.
 - **Local tone is tuned on one synthetic scene:** the base's two numbers (`EPSILON` in `base.wgsl`, how big a brightness step counts as an edge; `base_radius`, the window, 1/60 of the long edge) are guesses set by eye on a generated backlit scene. Real photos may want others.
 - **Local tone keeps fine texture, not everything:** detail about the size of the window or larger (broad clouds) counts as region and is still flattened, as the old global curves did. A region pushed more than halfway to black or white has its detail compressed too. Brightness and Contrast stay global.
 - **Local tone speed is unmeasured:** five extra quarter-size passes per edit change while Brilliance, Highlights or Shadows are set, and five more for Definition. Not timed on a 26 MP photo or during a drag.
@@ -294,25 +298,10 @@ So the preview never leaves the GPU, and processing stays in float until the fin
 
 ### Designs still to draw
 
-- Detail section, open (it is built, laid out like the other sections)
-- The 100% view: the photo filling the stage, the grab cursor, the "Loading the full size…" note (built without a design)
-- The neutral-point picker: its eyedropper in the Color header and the hint above the photo (built to match the curve pickers)
-- A hidden section's eye (built as the accent-lit icon; the canvas shows only the visible state)
-- Export progress, finished and failed states (built as a plain dialog; wants the Alert component)
-- Before/after split view (built as a white line you drag, with "Before" and "After" tags in the top corners; the top-bar button, accent-lit while it is on)
-- Paste with nothing copied (built as a dimmed Paste button)
-- The info panel with several photos selected (built showing the photo clicked last), and copy and paste in the Library (shortcuts only)
-- The export dialog's "Selected" option (built into the existing Photos control)
-- Clipping overlay on the photo (built as flat `clip-shadow` and `clip-highlight` over the clipped pixels)
-- Presets: list, save, apply, delete (built as a section under Detail: name rows, the lit row for the photo's look, an inline name field, an inline delete confirm)
-- Paste edits with a choice of sections
-- Curves' "Apply to: Channels / Luminance" switch (built as a segmented control under the channel tabs, on the RGB tab only)
-- White balance picker in use on the photo
-- Error and warning states: unreadable file, missing folder or drive
-- RAF-specific UI: true white balance in Kelvin, anything decoder-specific
-- RAF + JPEG pairs in the grid
-- Keyboard shortcut list; settings, if any are needed
-- New icons to add to the design system: eyedropper, folder, flip, swap orientation, cross (deletes a preset)
+Everything on the list is on the canvas now (2026-11-18), apart from:
+
+- New icons in the design system: eyedropper, folder, flip and swap orientation (the cross is the system's `close.svg`). The SVGs are drawn as the canvas has them inline; they aren't uploaded yet
+- A settings screen, if one is ever needed
 
 ### Decisions
 
