@@ -80,6 +80,10 @@ pub struct Placement {
     /// show as pure black, and over pixels with a channel at full.
     pub clip_shadow: Option<[f32; 3]>,
     pub clip_highlight: Option<[f32; 3]>,
+    /// The split view: where the photo divides, as a fraction of its drawn width. Left of it
+    /// shows the original (see [`Develop::develop_original`]), right of it the edit. None
+    /// shows the edit only.
+    pub split: Option<f32>,
 }
 
 #[repr(C)]
@@ -92,6 +96,7 @@ struct PresentUniform {
     background: [f32; 4],
     clip_shadow: [f32; 4],
     clip_highlight: [f32; 4],
+    split: [f32; 4],
 }
 
 const WORKING_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -124,6 +129,18 @@ struct Photo {
     present_group: wgpu::BindGroup,
     /// The developed result, for export.
     working: wgpu::TextureView,
+    /// Kept to make `original`'s finish pass when the split view first needs it.
+    stage: wgpu::TextureView,
+    quarter_a: wgpu::TextureView,
+    /// The photo with no adjustments, for the split view; made on first use.
+    original: Option<Original>,
+}
+
+/// A second working texture holding the photo developed with no adjustments, and what draws
+/// it beside the edit.
+struct Original {
+    finish_group: wgpu::BindGroup,
+    present_group: wgpu::BindGroup,
 }
 
 pub struct Develop {
@@ -279,6 +296,7 @@ impl Develop {
                 entry(0, wgpu::ShaderStages::FRAGMENT, texture(true)),
                 entry(1, wgpu::ShaderStages::FRAGMENT, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)),
                 entry(2, vf, uniform),
+                entry(3, wgpu::ShaderStages::FRAGMENT, texture(true)),
             ],
         });
         let present_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -429,6 +447,8 @@ impl Develop {
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&working_view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                 wgpu::BindGroupEntry { binding: 2, resource: self.present_uniform.as_entire_binding() },
+                // The split view's left side; unused here, as the split is off.
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&working_view) },
             ],
         });
         self.photo = Some(Photo {
@@ -448,6 +468,9 @@ impl Develop {
             histogram_group,
             present_group,
             working: working_view,
+            stage: stage_view,
+            quarter_a,
+            original: None,
         });
         self.developed = None;
     }
@@ -463,7 +486,7 @@ impl Develop {
     /// one is retried on a later call). Submits its own work so readbacks can start at once;
     /// draws later in the frame see the result, as the queue runs in order.
     pub fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, edit: &Edit) {
-        let Some(photo) = &self.photo else { return };
+        let Some(quarter) = self.photo.as_ref().map(|p| p.quarter) else { return };
         let develop = self.developed.as_ref() != Some(edit);
         let probe = self.pending_probe.filter(|_| self.probe_readback.is_idle());
         self.histogram_stale |= develop && self.histogram_enabled;
@@ -472,20 +495,8 @@ impl Develop {
             return;
         }
 
-        if self.uploaded_curves.as_ref() != Some(&edit.curves) {
-            let lut: Vec<f32> = [&edit.curves.rgb, &edit.curves.red, &edit.curves.green, &edit.curves.blue].iter().flat_map(|c| c.lut(LUT_SIZE)).collect();
-            queue.write_buffer(&self.curves, 0, bytemuck::cast_slice(&lut));
-            self.uploaded_curves = Some(edit.curves.clone());
-        }
-        let mut params = Params::from_edit(edit);
-        if let Some((_, [x, y])) = probe {
-            params.effects[2] = x as f32;
-            params.effects[3] = y as f32;
-        }
-        params.detail[3] = base_radius(photo.quarter);
-        params.output[0] = if self.display_p3 { 1.0 } else { 0.0 };
-        params.output[1] = self.detail_scale;
-        queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
+        let params = self.write_inputs(queue, edit, quarter, probe.map(|(_, pixel)| pixel));
+        let photo = self.photo.as_ref().expect("checked above");
         let [definition, _, noise, _] = params.detail;
         // Brilliance, Highlights and Shadows are the adjustments that act on regions.
         let local_tone = params.light[2] != 0.0 || params.light[3] != 0.0 || params.tone[0] != 0.0;
@@ -588,6 +599,71 @@ impl Develop {
         }
     }
 
+    /// Writes `edit`'s curves (when they changed) and parameters, with the pixel to probe, for
+    /// the next submission.
+    fn write_inputs(&mut self, queue: &wgpu::Queue, edit: &Edit, quarter: [u32; 2], probe: Option<[u32; 2]>) -> Params {
+        if self.uploaded_curves.as_ref() != Some(&edit.curves) {
+            let lut: Vec<f32> = [&edit.curves.rgb, &edit.curves.red, &edit.curves.green, &edit.curves.blue].iter().flat_map(|c| c.lut(LUT_SIZE)).collect();
+            queue.write_buffer(&self.curves, 0, bytemuck::cast_slice(&lut));
+            self.uploaded_curves = Some(edit.curves.clone());
+        }
+        let mut params = Params::from_edit(edit);
+        if let Some([x, y]) = probe {
+            params.effects[2] = x as f32;
+            params.effects[3] = y as f32;
+        }
+        params.detail[3] = base_radius(quarter);
+        params.output[0] = if self.display_p3 { 1.0 } else { 0.0 };
+        params.output[1] = self.detail_scale;
+        queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
+        params
+    }
+
+    /// Develops the photo with no adjustments into a texture of its own, for the left side of
+    /// the split view. Made and developed once per photo. Its passes run in a submission of
+    /// their own, so the parameters [`Self::update`] writes afterwards don't reach them.
+    pub fn develop_original(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let Some(photo) = &self.photo else { return };
+        if photo.original.is_some() {
+            return;
+        }
+        let quarter = photo.quarter;
+        self.write_inputs(queue, &Edit::default(), quarter, None);
+        let photo = self.photo.as_mut().expect("checked above");
+        let original = photo.original.get_or_insert_with(|| {
+            let view = device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("photo original"),
+                    size: wgpu::Extent3d { width: photo.size[0], height: photo.size[1], depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: WORKING_FORMAT,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default());
+            let group = |label, layout, resources: Vec<wgpu::BindingResource<'_>>| {
+                let entries: Vec<_> = resources.into_iter().enumerate().map(|(i, resource)| wgpu::BindGroupEntry { binding: i as u32, resource }).collect();
+                device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some(label), layout, entries: &entries })
+            };
+            let tex = wgpu::BindingResource::TextureView;
+            let sampler = wgpu::BindingResource::Sampler(&self.sampler);
+            let finish_group = group("finish original", &self.finish_layout, vec![tex(&photo.stage), tex(&photo.quarter_a), sampler.clone(), tex(&view), self.params.as_entire_binding()]);
+            let present_group = group("present split", &self.present_layout, vec![tex(&photo.working), sampler, self.present_uniform.as_entire_binding(), tex(&view)]);
+            Original { finish_group, present_group }
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("develop original") });
+        // No adjustments means no local tone, noise reduction or Definition: develop, then finish.
+        for (label, pipeline, group) in [("develop", &self.develop_pipeline, &photo.develop_group), ("finish", &self.finish_pipeline, &original.finish_group)] {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(label), timestamp_writes: None });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, group, &[]);
+            pass.dispatch_workgroups(photo.size[0].div_ceil(8), photo.size[1].div_ceil(8), 1);
+        }
+        queue.submit([encoder.finish()]);
+    }
+
     /// Whether work is waiting on a busy readback, so the caller should call
     /// [`Self::update`] again on a later frame.
     pub fn has_waiting_work(&self) -> bool {
@@ -638,10 +714,13 @@ impl Develop {
             background: [r, g, bl, 1.0],
             clip_shadow: clip(at.clip_shadow),
             clip_highlight: clip(at.clip_highlight),
+            // Off is left of the photo, which no pixel is.
+            split: [at.split.filter(|_| photo.original.is_some()).unwrap_or(-1.0), 0.0, 0.0, 0.0],
         };
         queue.write_buffer(&self.present_uniform, 0, bytemuck::bytes_of(&uniform));
         pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &photo.present_group, &[]);
+        let group = photo.original.as_ref().filter(|_| at.split.is_some()).map_or(&photo.present_group, |o| &o.present_group);
+        pass.set_bind_group(0, group, &[]);
         pass.draw(0..4, 0..1);
     }
 }

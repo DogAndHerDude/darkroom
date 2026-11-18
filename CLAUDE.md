@@ -92,7 +92,7 @@ Where things live in the app crate:
 
 - Rust is pinned (`rust-toolchain.toml`, RUNE's version). Don't change it independently of RUNE.
 - RUNE is pinned to a `dev` rev with `features = ["native-file-dialog"]`, and four crates are patched from the same rev (winit, parley_engine, wgpu-hal, accesskit_windows). Bump all five together. `wgpu` is pinned to RUNE's version so our resources live on RUNE's device.
-- Releases: `scripts/tag.sh` bumps the version and tags; a pushed tag runs `.github/workflows/release.yml`, which calls `scripts/build.sh` on macOS, Linux and Windows. Keep the build steps in `build.sh`, not in the workflow, so a local build and CI do the same thing. The scripts run on macOS's bash 3.2.
+- Releases: `scripts/tag.sh` bumps the version and tags; a pushed tag runs `.github/workflows/release.yml`, which calls `scripts/build.sh` on macOS, Linux and Windows. Keep the build steps in `build.sh`, not in the workflow, so a local build and CI do the same thing. The scripts run on macOS's bash 3.2. Packages: `.dmg`, AppImage and `.msi` (plus a bare `.tar.gz` and `.zip`); packaging files are in `packaging/`, icons in `assets/icon` (made by `scripts/icons.sh` from the design system's app icon). Release builds have no headless tooling (`--snap` panics), so test packaged binaries by opening them.
 - Dependencies build at `opt-level = 2` in dev (image decoding is unusable otherwise). `rawler` builds at 3 with overflow checks off: its demosaic relies on wrapping arithmetic and panics with checks on.
 
 ## Things you need to know to change the code
@@ -159,7 +159,7 @@ export DARKROOM_NO_PREFS=1 HOME=/path/to/scratch/home
 ./target/debug/darkroom path/to/folder --snap out.png --script events.json
 ```
 
-- Scenes: `develop, edited, curves, curve-red, extreme, definition, sharpen, denoise, warm, crop, cropped, hidden, original, clipping, zoom, picking, presets`. Add a scene when you add a state worth looking at.
+- Scenes: `develop, edited, curves, curve-luma, curve-red, extreme, definition, sharpen, denoise, warm, crop, cropped, hidden, original, split, clipping, zoom, picking, presets`. Add a scene when you add a state worth looking at.
 - The right-hand panel scrolls; use `--size 1280x1500` to see the lower sections.
 - `DARKROOM_DEBUG=1` prints each GPU readback.
 
@@ -199,4 +199,4 @@ The user tests the native folder picker and their own camera files by hand; head
 - At 100% a second, full-size `Develop` lives in the compositor (`Preview.full`); its memory and slider speed are unmeasured.
 - An edited photo's thumbnail is made again only when the photo is left, and a pipeline change doesn't refresh thumbnails already cached (delete `~/Library/Caches/darkroom/thumbs/*.edit.*`).
 - The RAF starting look fits tone and chroma, not hue: a Velvia sample's reds come out magenta where the camera's are orange. No black-and-white or DR200/400 RAF has been tried.
-- Presets work in Develop only, with no design yet. No before/after split yet; paste takes all sections. The Library has no status line, so a failure there shows only in Develop's panel.
+- Presets work in Develop only, with no design yet. Paste takes all sections. The Library has no status line, so a failure there shows only in Develop's panel.

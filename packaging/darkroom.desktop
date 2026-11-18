@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Darkroom
+Comment=Edit photos without changing the originals
+Exec=darkroom %f
+Icon=darkroom
+Categories=Graphics;Photography;
+Terminal=false

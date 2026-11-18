@@ -86,6 +86,13 @@ struct State {
     histories: HashMap<PathBuf, History>,
     /// The preview shows the photo without its edits: the top-bar toggle, or `\` held down.
     show_original: bool,
+    /// The split view: the original left of a line across the photo, the edit right of it,
+    /// both through the crop. The top-bar toggle or Y.
+    split: bool,
+    /// Where that line is, as a fraction of the photo slot's width, and where it was when the
+    /// current drag on it began.
+    split_at: f32,
+    split_start: f32,
     /// The edit taken by "Copy edits", for Paste. Kept until the app quits.
     copied: Option<Edit>,
     /// Saved looks, by name, and the folder they are kept in.
@@ -578,6 +585,9 @@ fn init() -> State {
         history: History::new(&Edit::default()),
         histories: HashMap::new(),
         show_original: false,
+        split: false,
+        split_at: 0.5,
+        split_start: 0.5,
         copied: None,
         presets: Vec::new(),
         presets_dir: presets::dir(),
@@ -757,6 +767,7 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
                 ("c", _) if s.module == Module::Develop => s.set_cropping(!s.cropping),
                 ("z", _) if s.module == Module::Develop => s.set_zoom(if s.zoom == Zoom::Fit { Zoom::Full } else { Zoom::Fit }),
                 ("\\", _) if s.module == Module::Develop => s.show_original = true,
+                ("y", _) if s.module == Module::Develop => s.split = !s.split,
                 _ => return false,
             }
         }
@@ -898,6 +909,9 @@ impl Compositor<State> for Preview {
         // At 100% the full-size photo, once it is here; until then the preview, enlarged.
         let shown = if f.rt.state.zoomed() { full.as_mut().unwrap_or(develop) } else { develop };
         let state = &f.rt.state;
+        if state.module == Module::Develop && state.splitting() {
+            shown.develop_original(f.device, f.queue);
+        }
         let mut slot_px = None;
         let (device, queue, clear) = (f.device, f.queue, f.rt.clear_color());
         f.ui.prepare(device, queue, &mut f.rt.text.atlas, &f.rt.instances, f.size);
@@ -925,6 +939,8 @@ impl Compositor<State> for Preview {
                     background: [c.r, c.g, c.b],
                     clip_shadow: state.clip_shadows.then_some(theme::CLIP_SHADOW).map(|c| [c.r, c.g, c.b]),
                     clip_highlight: state.clip_highlights.then_some(theme::CLIP_HIGHLIGHT).map(|c| [c.r, c.g, c.b]),
+                    // The line is placed on the slot; at 100% the photo can be narrower than it.
+                    split: state.splitting().then(|| (state.split_at * w - px) / pw),
                 },
             );
         });
@@ -960,6 +976,12 @@ fn main() {
                 s.edit.curves.rgb = Curve::new(vec![[0.0, 0.04], [0.25, 0.21], [0.5, 0.5], [0.75, 0.79], [1.0, 0.97]]);
                 s.edit.curves.red = Curve::new(vec![[0.0, 0.0], [0.5, 0.54], [1.0, 1.0]]);
                 s.curve_point = Some(1);
+            }),
+            // The same composite curve as `curves`, on luminance.
+            ("curve-luma", |s: &mut State| {
+                develop_scene(s);
+                s.edit.curves.rgb = Curve::new(vec![[0.0, 0.04], [0.25, 0.21], [0.5, 0.5], [0.75, 0.79], [1.0, 0.97]]);
+                s.edit.curves.luminance = true;
             }),
             ("curve-red", |s: &mut State| {
                 develop_scene(s);
@@ -1018,6 +1040,13 @@ fn main() {
                 develop_scene(s);
                 (s.edit.light.exposure, s.edit.color.saturation) = (1.0, 60.0);
                 s.show_original = true;
+            }),
+            // An edited, cropped photo in the split view, the line left of the middle.
+            ("split", |s: &mut State| {
+                develop_scene(s);
+                (s.edit.light.exposure, s.edit.color.saturation) = (1.0, 60.0);
+                s.edit.geometry = darkroom_core::Geometry { straighten: 8.0, crop: Some([0.1, 0.1, 0.8, 0.8]), ..Default::default() };
+                (s.split, s.split_at) = (true, 0.4);
             }),
             ("hidden", |s: &mut State| {
                 develop_scene(s);

@@ -109,6 +109,11 @@ impl State {
         self.zoom == Zoom::Full && !self.cropping
     }
 
+    /// The split view shows; the crop tool, which shows the whole photo, hides it.
+    pub fn splitting(&self) -> bool {
+        self.split && !self.cropping
+    }
+
     pub fn set_zoom(&mut self, zoom: Zoom) {
         self.zoom = zoom;
         if zoom == Zoom::Full {
@@ -334,6 +339,9 @@ pub fn view(s: &State, inset: f32) -> El {
             }
         });
     }
+    if s.splitting() {
+        photo = photo.children(split_line(s));
+    }
     if zoomed {
         photo = photo.on_wheel(|s: &mut State, e: WheelEvent, tx: &mut Tx| {
             tx.instant();
@@ -412,7 +420,7 @@ pub fn view(s: &State, inset: f32) -> El {
         .child(icon_button("undo", "Undo", undo_icon, s.history.can_undo(), State::undo))
         .child(icon_button("redo", "Redo", redo_icon, s.history.can_redo(), State::redo))
         .child(divider())
-        .child(icon_toggle("original", "Before and after", before_after_icon, s.show_original, |s| s.show_original = !s.show_original).help("Hold \\ to see the original"))
+        .child(icon_toggle("before-after", "Before and after", before_after_icon, s.split, |s| s.split = !s.split).help("Before and after side by side (Y). Hold \\ to see the whole original"))
         .child(zoom)
         .child(divider());
 
@@ -498,6 +506,30 @@ fn pixel_readout(s: &State, pick: Pick) -> Vec<El> {
         .child(text(pick.title()).font(t::BODY).color(t::INK))
         .child(text(format!("R {r}  G {g}  B {b}")).font(t::VALUE_SM).color(t::INK_MUTED));
     vec![ring, tip]
+}
+
+/// The split view's line, dragged sideways to move it, and the two sides' names in the top
+/// corners of the slot.
+fn split_line(s: &State) -> Vec<El> {
+    let tag = |label: &'static str| el().px(8.0).py(4.0).radius(7.0).fill(t::BG_CANVAS.alpha(0.7)).child(text(label).font(t::CAPTION).color(t::INK));
+    let names = row().absolute(0.0, 0.0).w_full().padding(8.0).child(tag("Before")).child(spacer()).child(tag("After"));
+    let line = el()
+        .key("split-line")
+        .absolute(s.split_at * s.slot_pts[0] - 8.0, 0.0)
+        .w(16.0)
+        .h_full()
+        .center()
+        .cursor(Cursor::ResizeColumn)
+        .on_drag(|s: &mut State, d: &mut Drag, tx: &mut Tx| {
+            tx.instant();
+            match d.phase {
+                Phase::Down => s.split_start = s.split_at,
+                Phase::Move => s.split_at = (s.split_start + d.dx / s.slot_pts[0].max(1.0)).clamp(0.0, 1.0),
+                Phase::Up => {}
+            }
+        })
+        .child(el().w(2.0).h_full().fill(t::INK).outline(1.0, 0.0, t::BG_CANVAS.alpha(0.5)));
+    vec![names, line]
 }
 
 /// The Color section's eyedropper: the next click on the photo sets Temperature and Tint.

@@ -129,10 +129,19 @@ fn lut(curve: u32, e: f32) -> f32 {
 }
 
 // Curves act on the display's red, green and blue (sRGB primaries), which is what R, G and B
-// mean to someone looking at the screen; on Rec.2020 channels they would shift hues.
-fn apply_curves(c2020: vec3<f32>) -> vec3<f32> {
-    var e = encode3(rec2020_to_srgb(c2020));
-    e = vec3<f32>(lut(0u, e.r), lut(0u, e.g), lut(0u, e.b));
+// mean to someone looking at the screen; on Rec.2020 channels they would shift hues. In the
+// luminance mode the composite curve maps encoded luminance instead and the channels are scaled
+// by the ratio, so a contrast curve leaves saturation and hue as they were.
+fn apply_curves(c2020: vec3<f32>, luminance: bool) -> vec3<f32> {
+    var c = c2020;
+    if luminance {
+        let y = dot(c, LUMA);
+        c = with_luma(c, y, decode(lut(0u, encode(y))));
+    }
+    var e = encode3(rec2020_to_srgb(c));
+    if !luminance {
+        e = vec3<f32>(lut(0u, e.r), lut(0u, e.g), lut(0u, e.b));
+    }
     e = vec3<f32>(lut(1u, e.r), lut(2u, e.g), lut(3u, e.b));
     return srgb_to_2020(decode3(e));
 }
@@ -152,7 +161,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     var c = before_curves(id.xy);
-    if p.effects.y > 0.5 { c = apply_curves(c); } // 5
+    if p.effects.y > 0.5 { c = apply_curves(c, p.effects.y > 1.5); } // 5
     textureStore(stage, vec2<i32>(id.xy), vec4<f32>(c, 1.0));
 }
 

@@ -24,7 +24,8 @@ pub struct Params {
     pub tone: [f32; 4],
     /// Saturation, vibrance (−1..1).
     pub color: [f32; 4],
-    /// Vignette (0..1), curves on (0 or 1), and the pixel the probe reads (x, y).
+    /// Vignette (0..1), curves (0 off, 1 on, 2 on with the composite curve on luminance), and
+    /// the pixel the probe reads (x, y).
     pub effects: [f32; 4],
     /// Definition (−1..1), sharpening and noise reduction (0..1), and the edge-aware base's
     /// window radius in quarter-size pixels (set per photo by `Develop`).
@@ -55,7 +56,11 @@ impl Params {
         } else {
             (0.0, [0.0; 4])
         };
-        let curves = if e.curves.enabled && !e.curves.is_identity() { 1.0 } else { 0.0 };
+        let curves = match (e.curves.enabled && !e.curves.is_identity(), e.curves.luminance) {
+            (false, _) => 0.0,
+            (true, false) => 1.0,
+            (true, true) => 2.0,
+        };
         Params { white_balance, light, tone, color, effects: [vignette, curves, 0.0, 0.0], detail, output: [0.0; 4] }
     }
 }
@@ -109,6 +114,17 @@ mod tests {
         assert_eq!(p.color, [0.0; 4]);
         assert_eq!(p.effects, [0.0; 4], "identity curves skip the curves step");
         assert_eq!(p.detail, [0.0; 4], "no detail passes");
+    }
+
+    #[test]
+    fn the_luminance_mode_reaches_the_shader_only_with_a_curve_to_apply() {
+        let mut e = Edit::default();
+        e.curves.luminance = true;
+        assert_eq!(Params::from_edit(&e).effects[1], 0.0, "identity curves still skip the step");
+        e.curves.rgb = darkroom_core::Curve::new(vec![[0.0, 0.0], [0.5, 0.6], [1.0, 1.0]]);
+        assert_eq!(Params::from_edit(&e).effects[1], 2.0);
+        e.curves.luminance = false;
+        assert_eq!(Params::from_edit(&e).effects[1], 1.0);
     }
 
     #[test]

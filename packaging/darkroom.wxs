@@ -1,0 +1,27 @@
+<!--
+  The Windows installer, built by scripts/build.sh with WiX 5 (`wix build`). It puts darkroom.exe
+  in Program Files\Darkroom with a Start menu shortcut, for every user of the machine.
+
+  UpgradeCode names Darkroom to Windows across versions, so a newer installer replaces an older
+  one. Never change it. Version comes from Cargo.toml, Exe and Icon are paths.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Darkroom" Manufacturer="DogAndHerDude" Version="$(var.Version)" UpgradeCode="DC8B54BE-EEBC-4261-A241-232AC1ABB0E0">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Darkroom is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="darkroom.ico" SourceFile="$(var.Icon)" />
+    <Property Id="ARPPRODUCTICON" Value="darkroom.ico" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Darkroom">
+        <Component>
+          <File Source="$(var.Exe)" KeyPath="yes">
+            <Shortcut Name="Darkroom" Directory="ProgramMenuFolder" Icon="darkroom.ico" WorkingDirectory="INSTALLFOLDER" Advertise="yes" />
+          </File>
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+  </Package>
+</Wix>

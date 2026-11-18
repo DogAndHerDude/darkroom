@@ -117,6 +117,9 @@ impl Default for Color {
 #[serde(default)]
 pub struct Curves {
     pub enabled: bool,
+    /// The composite curve moves luminance only, keeping each pixel's hue and saturation,
+    /// instead of acting on red, green and blue alike. The channel curves are unaffected.
+    pub luminance: bool,
     pub rgb: Curve,
     pub red: Curve,
     pub green: Curve,
@@ -125,7 +128,7 @@ pub struct Curves {
 
 impl Default for Curves {
     fn default() -> Self {
-        Curves { enabled: true, rgb: Curve::identity(), red: Curve::identity(), green: Curve::identity(), blue: Curve::identity() }
+        Curves { enabled: true, luminance: false, rgb: Curve::identity(), red: Curve::identity(), green: Curve::identity(), blue: Curve::identity() }
     }
 }
 
@@ -260,6 +263,12 @@ mod tests {
         let mut e = Edit::default();
         e.light.enabled = false;
         assert!(e.has_adjustments());
+    }
+
+    #[test]
+    fn curves_saved_before_the_luminance_mode_act_on_the_channels() {
+        let c: Curves = toml::from_str("enabled = true").expect("parses");
+        assert!(!c.luminance);
     }
 
     #[test]

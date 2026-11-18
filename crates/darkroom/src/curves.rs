@@ -12,7 +12,7 @@ pub use darkroom_core::Picker;
 use crate::State;
 use crate::develop::Pick;
 use crate::theme as t;
-use crate::ui::eyedropper_icon;
+use crate::ui::{eyedropper_icon, segmented};
 
 /// What a picker makes the clicked pixel, for the hint over the photo.
 pub fn target(p: Picker) -> &'static str {
@@ -79,7 +79,19 @@ pub fn body(s: &State) -> El {
         .child(spacer())
         .child(pickers(s.picker, s.probe_for.is_some()));
 
-    col().w_full().gap(12.0).child(channels(channel)).child(graph(s, channel, selected)).child(footer).child(pickers)
+    // The mode belongs to the composite curve, so it shows with it.
+    let mode = (channel == Channel::Rgb).then(|| {
+        row()
+            .w_full()
+            .center_y()
+            .child(text("Apply to").font(t::LABEL).color(t::INK_MUTED))
+            .child(spacer())
+            .child(segmented("curve-mode", &[(false, "Channels"), (true, "Luminance")], s.edit.curves.luminance, |s, on| {
+                s.edit.curves.luminance = on;
+                s.save();
+            }))
+    });
+    col().w_full().gap(12.0).child(channels(channel)).children(mode).child(graph(s, channel, selected)).child(footer).child(pickers)
 }
 
 /// Black, grey and white point pickers: the design system's toolbar of small icon buttons, each

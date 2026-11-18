@@ -6,7 +6,7 @@ struct Params {
     light: vec4<f32>,         // exposure multiplier, black point, brilliance, highlights
     tone: vec4<f32>,          // shadows, brightness, contrast
     color: vec4<f32>,         // saturation, vibrance
-    effects: vec4<f32>,       // vignette, curves on, probe x, probe y
+    effects: vec4<f32>,       // vignette, curves (0 off, 1 on, 2 on with the composite on luminance), probe x, probe y
     detail: vec4<f32>,        // definition (−1..1), sharpening, noise reduction (0..1), the base's window radius in quarter-size pixels
     output: vec4<f32>,        // x: 1 for Display P3 output, 0 for sRGB; y: detail scale (pixels here per preview pixel)
 }

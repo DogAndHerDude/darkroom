@@ -56,8 +56,11 @@ jobs:
         with:
           name: darkroom-${{ matrix.os }}
           path: |
+            dist/*.dmg
             dist/*.zip
             dist/*.tar.gz
+            dist/*.AppImage
+            dist/*.msi
           if-no-files-found: error
 
   release:

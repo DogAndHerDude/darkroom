@@ -15,7 +15,7 @@ Browse a folder, edit with Apple Photos-style adjustments plus proper RGB curves
 
 ## Status
 
-Phase: **implementation.** Every v1 area has a working first version. What follows is what's built, what isn't, what's built but known to be wrong, and what nobody has tried on real files yet. Last brought up to date 2026-11-15.
+Phase: **implementation.** Every v1 area has a working first version. What follows is what's built, what isn't, what's built but known to be wrong, and what nobody has tried on real files yet. Last brought up to date 2026-11-18.
 
 ### Built
 
@@ -25,11 +25,11 @@ Phase: **implementation.** Every v1 area has a working first version. What follo
 | Edit files | `.darkroom` beside each photo: read on open, written on slider release, removed when the edit is empty |
 | Light | Exposure, Brilliance, Highlights, Shadows, Brightness, Contrast, Black point. Brilliance, Highlights and Shadows act on regions, not single pixels |
 | Color | Saturation, Vibrance, Temperature, Tint; a neutral-point picker (the eyedropper in the section header) sets Temperature and Tint from a click on the photo |
-| Curves | RGB, R, G, B: add, drag and remove points (double-click); live histogram behind; black, grey and white point pickers on the photo. Every picker shows the pixel's R G B beside the pointer; Esc puts it down |
+| Curves | RGB, R, G, B: add, drag and remove points (double-click); live histogram behind; the RGB curve applies to the channels or to luminance only ("Apply to", on the RGB tab), which keeps hue and saturation; black, grey and white point pickers on the photo. Every picker shows the pixel's R G B beside the pointer; Esc puts it down |
 | Detail | Definition, Sharpening, Noise reduction, Vignette; same reach at any render size |
 | Sliders | Drag; double-click the track or the label to reset; click the value to type one (Return or a click elsewhere sets it, Esc cancels) |
 | Sections | The eye icon hides or shows a section's edits; Reset all |
-| Before/after | The original while `\` is held, or toggled with the top-bar button |
+| Before/after | Split view from the top-bar button or `Y`: the original left of a line across the photo, the edit right of it, both through the crop; drag the line to move it. Holding `\` shows the whole original |
 | Copy/paste edits | "Copy edits" and "Paste" under the panel in Develop, or ⇧⌘C and ⇧⌘V there and in the Library, where paste goes onto every selected photo. Paste replaces Light, Color, Curves and Detail and keeps each photo's own crop, rating and flag; one undo step a photo |
 | Presets | The Presets section at the bottom of Develop's panel: "Save preset…" keeps the photo's Light, Color, Curves and Detail under a typed name (Return saves, Esc cancels; a taken or unusable name says why under the field); a click on a name puts that look on the photo as one undo step, keeping its crop, rating and flag; the preset matching the photo's look is lit; the cross deletes after a confirm. Kept as one TOML file each in `~/Library/Application Support/darkroom/presets`, never overwritten |
 | Undo/redo | ⌘Z and ⇧⌘Z, or the arrows in the top bar, in Develop. One step per finished change (a slider drag, a curve point, a crop, a reset); each photo keeps its steps until the app quits |
@@ -45,7 +45,7 @@ Phase: **implementation.** Every v1 area has a working first version. What follo
 | Filmstrip | In Develop, with ← → |
 | First launch | Choose a root folder; remembered |
 | Export | JPEG, PNG, 16-bit TIFF; long-edge resize; sRGB or Display P3 with ICC profile; camera info without location; one photo, the Library's selection, or everything shown; progress and failures listed |
-| Releases | `scripts/tag.sh` bumps the version, tests, commits and tags; a pushed tag builds macOS, Linux and Windows packages on GitHub Actions and publishes them as a release (see "Releasing") |
+| Releases | `scripts/tag.sh` bumps the version, tests, commits and tags; a pushed tag builds a macOS `.dmg`, a Linux AppImage and a Windows `.msi` (plus bare `.tar.gz` and `.zip`) on GitHub Actions and publishes them as a release, each with the design system's app icon (see "Releasing") |
 | RAF | Developed with `rawler` to linear floats; thumbnails and EXIF from the embedded JPEG |
 | RAF starting look | An unedited RAF starts as the camera rendered it: a tone curve and a chroma curve are fitted per photo against the embedded JPEG, so the film simulation, dynamic range and tone settings carry over, and the edit file stays empty. A black-and-white simulation (from the MakerNote) starts in black and white. Highlights the JPEG clipped roll off under white, so they stay recoverable |
 
@@ -56,11 +56,9 @@ In the spec or the designs, with no code yet.
 | Feature | Design | Notes |
 | --- | --- | --- |
 | Paste with a choice of sections | ✗ | Paste always takes all four sections |
-| Before/after split view | ✗ | The held key and the toggle are built |
 | Film simulation under the photo's name in Develop | ✅ | The design's top bar reads "Classic Chrome · 4 of 248"; only the name is shown |
 | Missing folder or drive, unreadable file | ✗ | Failures show as a line of status text only |
 | Export file naming | ✅ | Files keep the photo's name; no template |
-| Curves luminance-only mode | ✗ | Still "maybe" in the spec |
 | Bundled fonts (Rubik, DM Mono) | n/a | The design system ships `.woff2`; unknown whether RUNE loads it |
 | Theme generated from `tokens.json` | n/a | `theme.rs` is converted by hand |
 | Keyboard shortcut list, settings screen | ✗ | |
@@ -83,7 +81,9 @@ Design column: ✅ designed on the canvas · ◐ partly · ✗ not designed · n
 - **RAF hot pixels:** isolated bright pixels at 100%; the camera maps them out, nothing here does.
 - **RAF + JPEG pairs** show as two separate photos.
 - **Undo history:** lost on quit, and capped at 200 steps a photo. Rating and flag changes aren't steps. The top-bar arrows have no tooltip and their icons don't brighten on hover as the design's do.
-- **Before/after drops the crop too:** the original shows whole and unrotated, so a cropped photo jumps in size instead of comparing like with like.
+- **Curves' luminance mode is undesigned:** the "Apply to: Channels / Luminance" switch is built in the panel's style, without a design, and shows only on the RGB tab. Luminance is scaled in linear light, so a saturated colour pushed up can go past white in one channel and is then brought in by the output step (as Light's tone is). On the test chart's hue bar an S curve shifted hue by at most 0.5° in this mode against 3.8° on the channels; greys come out the same either way. Generated chart only.
+- **Holding `\` drops the crop too:** the original shows whole and unrotated, so a cropped photo jumps in size. The split view keeps the crop on both sides.
+- **Split view is undesigned and plain:** built without a design (a 2 pt white line with a 16 pt grab area, and "Before" and "After" tags in the slot's top corners). At 100% the line and tags span the stage, not the photo, when the photo is smaller than the stage. The line is placed from the slot's size as laid out the frame before, so the first frame after a layout change can show it in the wrong place (a one-frame headless snapshot does). The clipping warnings paint both sides. No side-by-side or top/bottom layouts, and the line's place is kept only until the app quits. The original is developed into one more `Rgba16Float` texture the size of what is shown: about 35 MB at the 2560 px preview and about 210 MB for a 26 MP photo at 100% (worked out from the texture sizes, not measured).
 - **Copied edits live in the app only:** not on the system clipboard, gone on quit. In the Library, copy and paste are shortcuts only (no button), and a paste there can only be undone photo by photo, with ⌘Z after opening each one in Develop, and only until the app quits.
 - **Multi-select is clicks and ⌘A only:** no ⇧-arrow to extend, no drag to select, no key to drop the selection (click a photo). A selected photo that a filter hides stays selected but is left alone by ratings, flags, paste and export, and comes back selected when the filter is lifted. The filmstrip in Develop doesn't show or use the selection.
 - **The Library shows no status line:** a rating, flag or paste that fails there (an unreadable edit file) says so only in Develop's panel, and nothing in the Library confirms a paste except the thumbnails changing. The same goes for a photo the Library refuses to open. An edit file's parse error is several lines long and runs out of the panel's one-line status.
@@ -92,7 +92,7 @@ Design column: ✅ designed on the canvas · ◐ partly · ✗ not designed · n
 - **Edited thumbnails lag the edit:** a thumbnail is made again when you open another photo or leave Develop, not while you edit, and each time decodes the whole file (a RAF is developed again, a few seconds). A change to the pipeline's code doesn't refresh thumbnails already cached. A photo edited and then reset leaves its old edited thumbnail in the cache, unused.
 - **Presets are Develop only and undesigned:** built without a design, in the panel's style. No applying a preset to the Library's selection, no rename, no updating a preset with a new look (delete and save again), no folders of presets. The folder is read at launch and after a save or delete, so a file added in Finder shows on the next launch. A deleted preset is gone (no undo, no Trash). A preset file that doesn't parse is skipped and named in the status line, and only the first such file is named. Preset files are written in full, like edit files. The section sits below Detail, so it is off screen until the panel is scrolled.
 - **Folder watching leaves the open photo alone:** a photo open in Develop that is replaced on disk keeps showing the old pixels until it is opened again; one that is deleted stays open, and editing it writes an edit file for a photo that is gone. Edit files changed by another app (a sync, another Mac) aren't picked up until the folder is opened again, since Darkroom's own saves are ignored by name. Every change reads the whole folder again (EXIF and edit file of every photo) and scans the whole tree; untimed on a large folder or tree. A photo still being copied may get no thumbnail until the copy's last change comes in. A watch that can't start says so in the status line only (which the Library doesn't show).
-- **Linux and Windows builds are macOS-shaped:** exports there carry no ICC profile (it is read from `/System/Library/ColorSync`), so a Display P3 export is mislabelled as untagged; the thumbnail cache and presets go under `$HOME/Library/...` (on Windows, where `HOME` is usually unset, into the temp folder); the top bar leaves room for macOS's traffic lights. Releases are unsigned on every platform.
+- **Linux and Windows builds are macOS-shaped:** exports there carry no ICC profile (it is read from `/System/Library/ColorSync`), so a Display P3 export is mislabelled as untagged; the thumbnail cache and presets go under `$HOME/Library/...` (on Windows, where `HOME` is usually unset, into the temp folder); the top bar leaves room for macOS's traffic lights. Releases are unsigned on every platform. The Windows `.exe` itself carries no icon (the installer, its Start menu shortcut and Add or Remove Programs do), and the installer has no dialogs beyond Windows' own progress window: no licence page, no choice of folder. The AppImage bundles no libraries, so it needs the system's `libxkbcommon` (every desktop session has it) and glibc 2.39 or newer (Ubuntu 24.04, Debian 13, Fedora 40 and later), from the runner it is built on. The app icon fills its square to the edges, where macOS's own icons leave a margin, so it looks a little larger than its neighbours in the Dock.
 - **Verbose edit files:** reading is sparse (missing fields are neutral), but saving writes every field, so a rating alone produces a full file.
 - **Preview is 8-bit sRGB:** RUNE has no known path for high-bit-depth or P3 output of app-supplied images. Processing is float and exports are unaffected.
 - **TIFF exports carry no camera info.**
@@ -107,6 +107,8 @@ Everything was built against generated test images and six RAFs downloaded from 
 - Real Fujifilm JPEGs: EXIF fields, orientation, speed (the EXIF line was seen only on a JPEG with hand-written EXIF)
 - 100% on a real 26 MP JPEG or a RAF: only a generated 5400 × 3600 PNG so far
 - Holding `\` on a real keyboard (key repeat, a layout where `\` needs a modifier), ⇧⌘C and ⇧⌘V from real keys, and the before/after button's tooltip: scripted key events only
+- Curves' luminance mode on a real photo (skin, foliage, a saturated sky)
+- The split view's line dragged with a real mouse or trackpad, and the split on a real photo or a RAF, at Fit or 100%: scripted clicks, keys and one drag on the test chart only
 - Panning with a real trackpad or mouse wheel (scripted drag and wheel events only)
 - Local tone (Brilliance, Highlights, Shadows) and Definition on any real photo: only a generated backlit scene so far
 - The top bar beside the real traffic lights, and in full screen: checked only against RUNE's headless overlay of where macOS draws them
@@ -117,7 +119,7 @@ Everything was built against generated test images and six RAFs downloaded from 
 - Thumbnail speed on a folder of 26–40 MP files (first visit decodes each one)
 - Noise reduction at full size on a noisy high-ISO photo (the taps are spread apart for export; only seen on ISO 160)
 - Slider drag speed with noise reduction on (81 taps per pixel)
-- The release workflow on GitHub, and the Windows build at all: `build.sh` ran on this Mac (universal app; both architectures launched) and in a Debian container (an aarch64 Linux binary, not run); `tag.sh` ran against a scratch clone and bare repo, including a failing clippy. The Linux and Windows apps have never been opened
+- The release workflow on GitHub (it has never run: `v0.0.1` was tagged before it existed), and the Windows build and `.msi` at all: the Windows code type-checks (`cargo check --target x86_64-pc-windows-msvc`) and nothing more. `build.sh` ran on this Mac (the `.dmg` mounted, holding a universal, validly signed app with its icon; the app wasn't opened from it) and in an Ubuntu 24.04 container (aarch64: the AppImage built, extracted, and ran as far as needing a display; the x86_64 one CI makes is untried). `tag.sh` ran against a scratch clone and bare repo, including a failing clippy. The Linux and Windows apps have never been opened on a desktop
 - Folder watching with a Finder copy, a card import, an external or network drive, or a large folder: `cp`, `mkdir` and `rm` from a shell on four generated PNGs only
 - Presets from a real keyboard and mouse, and in the real `~/Library/Application Support`: scripted clicks and typing in a scratch home only, on the test chart and one generated PNG
 - Exported capture time and lens info as other apps read them
@@ -131,7 +133,7 @@ cargo run -p darkroom -- path/to/folder          # browse a folder (not remember
 cargo run -p darkroom -- path/to/photo.jpg       # open a photo in Develop (or a .RAF)
 cargo run -p darkroom -- --snap out.png --scene edited   # headless snapshot, no window
 # DARKROOM_NO_PREFS=1 ignores saved settings (root folder, thumbnail size), for tests
-# Develop scenes on the test chart: develop, edited, curves, curve-red, extreme, warm, hidden, original, clipping, definition, sharpen, denoise, crop, cropped, zoom, picking, presets
+# Develop scenes on the test chart: develop, edited, curves, curve-luma, curve-red, extreme, warm, hidden, original, split, clipping, definition, sharpen, denoise, crop, cropped, zoom, picking, presets
 # (the detail scenes need a photo with texture and noise to show anything)
 # the panel scrolls; for the Curves section in a snapshot add --size 1280x1500
 # drive it: --script events.json (clicks and drags in window points, or "key": an element's key)
@@ -154,13 +156,15 @@ scripts/build.sh                  # a release build for this machine only, into 
 
 `tag.sh` needs a clean tree on `main`. It counts up from the newer of `Cargo.toml`'s version and the latest `vX.Y.Z` tag, sets `[workspace.package] version`, refreshes `Cargo.lock`, and runs the tests and clippy (`-D warnings`) before committing; if they fail it puts `Cargo.toml` back and tags nothing. Without `--push` it prints the push command.
 
-A pushed `vX.Y.Z` tag starts `.github/workflows/release.yml`: `scripts/build.sh` runs on a macOS, a Linux and a Windows runner, and the three packages become that tag's GitHub release. The workflow refuses a tag that doesn't match `Cargo.toml`. Run by hand from the Actions tab, it builds the packages as artifacts without a release.
+A pushed `vX.Y.Z` tag starts `.github/workflows/release.yml`: `scripts/build.sh` runs on a macOS, a Linux and a Windows runner, and the five packages become that tag's GitHub release. The workflow refuses a tag that doesn't match `Cargo.toml`. Run by hand from the Actions tab, it builds the packages as artifacts without a release.
 
 | Platform | Package |
 | --- | --- |
-| macOS | `darkroom-X.Y.Z-macos-universal.zip`: `Darkroom.app` for Apple silicon and Intel, macOS 11 or later, ad-hoc signed (no Developer ID, not notarized, no icon) |
-| Linux | `darkroom-X.Y.Z-linux-x86_64.tar.gz`: the binary; links libxkbcommon, and glibc no older than the runner's (Ubuntu 24.04) |
-| Windows | `darkroom-X.Y.Z-windows-x86_64.zip`: `darkroom.exe` |
+| macOS | `darkroom-X.Y.Z-macos-universal.dmg`: `Darkroom.app` beside a link to Applications, for Apple silicon and Intel, macOS 11 or later, ad-hoc signed (no Developer ID, not notarized: Gatekeeper asks on first open) |
+| Linux | `darkroom-X.Y.Z-linux-x86_64.AppImage`: runs as it is (`chmod +x`), with a desktop entry and icon inside; needs `libxkbcommon` and glibc 2.39 or newer. `darkroom-X.Y.Z-linux-x86_64.tar.gz`: the bare binary |
+| Windows | `darkroom-X.Y.Z-windows-x86_64.msi`: installs into Program Files with a Start menu shortcut; a newer one replaces an older one. `darkroom-X.Y.Z-windows-x86_64.zip`: the bare `darkroom.exe` |
+
+The packaging tools are fetched by `build.sh` on first use, at versions pinned in it: appimagetool 1.9.1 (MIT) and the AppImage runtime, both checked against their SHA-256, and WiX 5.0.2 (MS-RL; a build tool only, nothing of it ships; v6 and later ask for a maintenance-fee EULA). The icons in `assets/icon` are made from the design system's 1024 px app icon by `scripts/icons.sh` (macOS), and committed; run it again if the icon changes. The installer's `UpgradeCode` in `packaging/darkroom.wxs` must never change.
 
 ## Workspace
 
@@ -192,7 +196,7 @@ Per pixel, in order:
 3. **Exposure:** a multiplier, 2^stops.
 4. **Light:** black point per channel in linear light. Then tone on perceptually encoded luminance; the channels are scaled by the luminance ratio, so hue holds. Brilliance, Highlights and Shadows are local: the brightness of the pixel's region (the edge-aware base) moves along the tone curve and the pixel keeps its distance from it, so a lifted shadow keeps its texture. Black and white stay fixed. Brightness and Contrast are global curves.
 5. **Color:** Saturation and Vibrance scale chroma in Oklab, at constant hue and lightness.
-6. **Curves:** composite then per-channel, on display (sRGB-primary) channels in perceptual encoding. Lookup tables come from `Curve::lut`.
+6. **Curves:** composite then per-channel, on display (sRGB-primary) channels in perceptual encoding. In the luminance mode the composite curve maps encoded luminance instead and the channels are scaled by the ratio, so hue and saturation hold. Lookup tables come from `Curve::lut`.
 7. **Detail:**
    - **Noise reduction:** in its own pass, before the others.
    - **Reach:** sharpening and noise reduction are defined in preview pixels and scaled by `Develop::detail_scale` (render long edge ÷ preview long edge: 1 in the preview, about 2.4 for a full-size 26 MP export). Sharpening's blur taps move apart by the scale; noise reduction keeps its 9 × 9 taps and spreads them by a whole-pixel stride, so cost per pixel doesn't grow.
@@ -269,6 +273,7 @@ How it runs: one photo at a time. A background thread decodes the full image and
   | ⌘Z / ⇧⌘Z | Undo / redo (Develop) |
   | ⇧⌘C / ⇧⌘V | Copy / paste edits (in the Library, paste goes onto every selected photo) |
   | ⌘-click / ⇧-click / ⌘A | Add or take out a photo / select a range / select all shown (Library) |
+  | Y | Before and after, split (Develop) |
   | `\` held | Show the original (Develop) |
   | Z | Fit / 100% (Develop) |
   | Return or Esc | Leave the crop tool; Esc also closes the export dialog |
@@ -294,14 +299,14 @@ So the preview never leaves the GPU, and processing stays in float until the fin
 - The neutral-point picker: its eyedropper in the Color header and the hint above the photo (built to match the curve pickers)
 - A hidden section's eye (built as the accent-lit icon; the canvas shows only the visible state)
 - Export progress, finished and failed states (built as a plain dialog; wants the Alert component)
-- Before/after split view
-- The before/after button while the original shows (built as the accent-lit toggle)
+- Before/after split view (built as a white line you drag, with "Before" and "After" tags in the top corners; the top-bar button, accent-lit while it is on)
 - Paste with nothing copied (built as a dimmed Paste button)
 - The info panel with several photos selected (built showing the photo clicked last), and copy and paste in the Library (shortcuts only)
 - The export dialog's "Selected" option (built into the existing Photos control)
 - Clipping overlay on the photo (built as flat `clip-shadow` and `clip-highlight` over the clipped pixels)
 - Presets: list, save, apply, delete (built as a section under Detail: name rows, the lit row for the photo's look, an inline name field, an inline delete confirm)
 - Paste edits with a choice of sections
+- Curves' "Apply to: Channels / Luminance" switch (built as a segmented control under the channel tabs, on the RGB tab only)
 - White balance picker in use on the photo
 - Error and warning states: unreadable file, missing folder or drive
 - RAF-specific UI: true white balance in Kelvin, anything decoder-specific
