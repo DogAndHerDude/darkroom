@@ -16,6 +16,7 @@ mod library;
 mod photo;
 mod presets;
 mod raw;
+mod shortcuts;
 mod theme;
 mod ui;
 
@@ -35,6 +36,7 @@ use rune::{App, AppSpec, Chrome, Compositor, Cx, El, Frame, Image, ImageCache, K
 use crate::curves::Picker;
 use crate::develop::{Adjustment, Pick, Zoom};
 use crate::jobs::{Full, Jobs, Msg, Prepared, ThumbStore};
+use crate::library::{Note, first_line};
 use crate::photo::Photo;
 
 /// The effect slot the photo is drawn into.
@@ -105,6 +107,15 @@ struct State {
     preset_deleting: Option<String>,
     /// The last save's or open's outcome, shown in the panel.
     status: String,
+    /// What the Library's last rating, flag, copy or paste did, for the line under its grid.
+    library_note: Option<Note>,
+    /// The keyboard shortcuts list is open.
+    shortcuts: bool,
+    /// The folder shown isn't there.
+    folder_missing: bool,
+    /// The photo Develop tried to open last, and why it couldn't. Develop shows this in place
+    /// of a photo; nothing is open meanwhile.
+    open_failed: Option<(PathBuf, String)>,
     /// The curve the Curves section shows.
     curve_channel: Channel,
     /// The selected point on that curve.
@@ -312,6 +323,7 @@ impl State {
         self.jobs.scan(root.clone());
         let last = self.prefs.get::<PathBuf>("folder").filter(|f| f.starts_with(&root) && f.is_dir());
         self.root = Some(root.clone());
+        self.jobs.unwatch();
         self.watch_root();
         self.open_folder(last.unwrap_or(root));
     }
@@ -339,6 +351,7 @@ impl State {
 
     /// Shows `folder`'s photos, loading them in the background.
     fn open_folder(&mut self, folder: PathBuf) {
+        self.library_note = None;
         if self.root.is_some() {
             let _ = self.prefs.set("folder", &folder);
         }
@@ -378,33 +391,65 @@ impl State {
         self.jobs.open(path);
     }
 
-    /// Sets a photo's rating (0–5), in its edit file and the library.
-    fn set_rating(&mut self, path: &Path, rating: u8) {
-        self.change(path, |e| e.rating = rating.min(5));
+    /// Rates the targets (0–5), in their edit files and the library.
+    fn rate(&mut self, rating: u8) {
+        let rating = rating.min(5);
+        let done = |what: &str| if rating == 0 { format!("Cleared the rating of {what}") } else { format!("Rated {what} {rating} star{}", if rating == 1 { "" } else { "s" }) };
+        self.change_targets(done, |e| e.rating = rating);
     }
 
-    fn set_flag(&mut self, path: &Path, flag: Flag) {
-        self.change(path, |e| e.flag = flag);
+    fn flag(&mut self, flag: Flag) {
+        let verb = match flag {
+            Flag::Pick => "Picked",
+            Flag::Reject => "Rejected",
+            Flag::None => "Unflagged",
+        };
+        self.change_targets(|what| format!("{verb} {what}"), |e| e.flag = flag);
+    }
+
+    /// Changes every target's edit and says how it went (see [`Self::report`]).
+    fn change_targets(&mut self, done: impl Fn(&str) -> String, f: impl Fn(&mut Edit)) {
+        let targets = self.targets();
+        let failed: Vec<(PathBuf, String)> = targets.iter().filter_map(|p| self.change(p, &f).err().map(|e| (p.clone(), e))).collect();
+        self.report(&targets, &failed, done, None);
     }
 
     /// Changes a photo's edit: the open one's directly, any other through its edit file.
-    fn change(&mut self, path: &Path, f: impl FnOnce(&mut Edit)) {
+    fn change(&mut self, path: &Path, f: impl FnOnce(&mut Edit)) -> Result<(), String> {
         if self.path.as_deref() == Some(path) {
             f(&mut self.edit);
             self.save();
-            return;
+            return Ok(());
         }
-        match sidecar::load(path) {
-            Ok(mut edit) => {
-                f(&mut edit);
-                if let Err(e) = sidecar::save(path, &edit) {
-                    self.status = format!("Couldn't save: {e}");
-                }
-                if let Some(e) = self.entries.iter_mut().find(|e| e.path == path) {
-                    (e.rating, e.flag) = (edit.rating, edit.flag);
-                }
+        let mut edit = sidecar::load(path).map_err(|e| first_line(&e.to_string()).to_owned())?;
+        f(&mut edit);
+        sidecar::save(path, &edit).map_err(|e| first_line(&e.to_string()).to_owned())?;
+        if let Some(e) = self.entries.iter_mut().find(|e| e.path == path) {
+            (e.rating, e.flag) = (edit.rating, edit.flag);
+        }
+        Ok(())
+    }
+
+    /// Says how an action on `targets` went: in the Library's status line "Rated DSCF4127 …" or
+    /// "… 3 photos", or the first failure; in Develop, where the open photo's own save reports
+    /// success, only a failure, in the panel.
+    fn report(&mut self, targets: &[PathBuf], failed: &[(PathBuf, String)], done: impl Fn(&str) -> String, hint: Option<&'static str>) {
+        let name = |p: &Path| p.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        let note = match failed {
+            [] if targets.is_empty() => return,
+            [] => {
+                let what = if let [one] = targets { name(one) } else { format!("{} photos", targets.len()) };
+                Note { text: done(&what), failed: false, hint }
             }
-            Err(e) => self.status = format!("Couldn't read the edit file: {e}"),
+            [(path, e), rest @ ..] => {
+                let more = if rest.is_empty() { String::new() } else { format!(" ({} more failed)", rest.len()) };
+                Note { text: format!("Nothing changed for {}: {e}{more}", name(path)), failed: true, hint: None }
+            }
+        };
+        if self.module == Module::Library {
+            self.library_note = Some(note);
+        } else if note.failed {
+            self.status = note.text;
         }
     }
 
@@ -412,7 +457,7 @@ impl State {
     /// the Library.
     fn target(&self) -> Option<PathBuf> {
         match self.module {
-            Module::Develop => self.path.clone(),
+            Module::Develop => self.path.clone().or_else(|| self.open_failed.as_ref().map(|(p, _)| p.clone())),
             Module::Library => self.selected.primary.clone(),
         }
     }
@@ -453,10 +498,11 @@ impl State {
                 }
                 self.tree = Some(tree);
             }
-            Msg::Folder { generation, folder, entries } => {
+            Msg::Folder { generation, folder, found, entries } => {
                 if generation != self.folder_generation || self.folder.as_ref() != Some(&folder) {
                     return;
                 }
+                self.folder_missing = !found;
                 // Read again after a change on disk: a photo that went loses its thumbnail and
                 // its place in the selection, and one whose file changed gets a new thumbnail.
                 let now: HashMap<&Path, _> = entries.iter().map(|e| (e.path.as_path(), e.modified)).collect();
@@ -476,6 +522,17 @@ impl State {
                 self.jobs.thumbnails(wanted);
             }
             Msg::Changed(paths) => self.changed_on_disk(&paths),
+            Msg::RootThere(there) => {
+                // Back, it is watched again; either way the tree and the folder shown are read again.
+                if there {
+                    self.watch_root();
+                }
+                let Some(root) = self.root.clone() else { return };
+                self.jobs.scan(root);
+                if let Some(folder) = self.folder.clone() {
+                    self.folder_generation = self.jobs.load_folder(folder);
+                }
+            }
             Msg::ThumbRender { prepared, store } => self.thumb_gpu.push((prepared, store)),
             Msg::Thumb { path, width, height, rgba } => {
                 if let Some(images) = &self.images {
@@ -526,6 +583,7 @@ impl State {
                 match result {
                     Ok(opened) => {
                         let (photo, edit) = *opened;
+                        self.open_failed = None;
                         self.refresh_thumb();
                         self.histogram = photo.histogram;
                         self.photo = Arc::new(photo);
@@ -549,6 +607,15 @@ impl State {
                     Err(e) => {
                         let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
                         self.status = format!("Couldn't open {name}: {e}");
+                        // Nothing stays open, so no edit or rating lands on the photo before.
+                        self.refresh_thumb();
+                        if let Some(p) = self.path.take() {
+                            let left = std::mem::replace(&mut self.history, History::new(&Edit::default()));
+                            self.histories.insert(p, left);
+                        }
+                        self.edit = Edit::default();
+                        (self.cropping, self.picker, self.entry, self.full, self.full_loading) = (false, None, None, None, None);
+                        self.open_failed = Some((path, first_line(&e).to_owned()));
                     }
                 }
             }
@@ -595,6 +662,10 @@ fn init() -> State {
         preset_name: TextEdit::new(""),
         preset_deleting: None,
         status: String::new(),
+        library_note: None,
+        shortcuts: false,
+        folder_missing: false,
+        open_failed: None,
         curve_channel: Channel::Rgb,
         curve_point: None,
         curve_removing: false,
@@ -658,13 +729,16 @@ fn init() -> State {
                 }
                 Err(e) => {
                     s.status = format!("Couldn't open {}: {e}", file.display());
+                    s.open_failed = Some((file.clone(), first_line(&e).to_owned()));
+                    s.module = Module::Develop;
                     // Still the selected photo, so rating keys don't land on the folder's first.
                     s.selected = Selection::only(file);
                 }
             }
         }
         None => {
-            if let Some(root) = s.prefs.get::<PathBuf>("root").filter(|r| r.is_dir()) {
+            // Even when it isn't there (a drive not connected): the Library then says so.
+            if let Some(root) = s.prefs.get::<PathBuf>("root") {
                 s.set_root(root, false);
             }
         }
@@ -725,6 +799,18 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     if s.entry.is_some() || (s.naming_preset && s.preset_name.focused) {
         return false;
     }
+    // The shortcuts list takes every key while it is open; `?` opens and closes it.
+    let question = matches!(&ev.key, Key::Text(t) if t == "?");
+    if s.shortcuts {
+        if question || ev.key == Key::Escape {
+            s.shortcuts = false;
+        }
+        return true;
+    }
+    if question && s.export_scope.is_none() && s.export_run.is_none() {
+        s.shortcuts = true;
+        return true;
+    }
     if ev.is_command('z') && s.module == Module::Develop && s.export_scope.is_none() && s.export_run.is_none() {
         if ev.mods.shift { s.redo() } else { s.undo() }
         return true;
@@ -758,10 +844,10 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         Key::Text(t) => {
             let targets = s.targets();
             match (t.to_lowercase().as_str(), !targets.is_empty()) {
-                (d @ ("0" | "1" | "2" | "3" | "4" | "5"), true) => targets.iter().for_each(|p| s.set_rating(p, d.parse().unwrap_or(0))),
-                ("p", true) => targets.iter().for_each(|p| s.set_flag(p, Flag::Pick)),
-                ("x", true) => targets.iter().for_each(|p| s.set_flag(p, Flag::Reject)),
-                ("u", true) => targets.iter().for_each(|p| s.set_flag(p, Flag::None)),
+                (d @ ("0" | "1" | "2" | "3" | "4" | "5"), true) => s.rate(d.parse().unwrap_or(0)),
+                ("p", true) => s.flag(Flag::Pick),
+                ("x", true) => s.flag(Flag::Reject),
+                ("u", true) => s.flag(Flag::None),
                 ("g", _) => s.switch_to(Module::Library),
                 ("d", _) => s.switch_to(Module::Develop),
                 ("c", _) if s.module == Module::Develop => s.set_cropping(!s.cropping),
@@ -792,7 +878,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         Module::Library => library::view(s, inset),
         Module::Develop => develop::view(s, inset),
     };
-    rune::el().w_full().h_full().on_key_up(key_up).child(module).children(export::dialog(s))
+    rune::el().w_full().h_full().on_key_up(key_up).child(module).children(export::dialog(s)).children(shortcuts::dialog(s))
 }
 
 // ---- drawing ----------------------------------------------------------------------------------
@@ -838,6 +924,7 @@ impl Compositor<State> for Preview {
                 gpu.histogram_enabled = false;
                 gpu.display_p3 = settings.display_p3;
                 gpu.detail_scale = prepared.detail_scale;
+                gpu.as_shot = prepared.as_shot;
                 gpu.set_photo(f.device, f.queue, u64::MAX - index as u64, prepared.size, prepared.pixels.source());
                 gpu.update(f.device, f.queue, &prepared.edit);
                 let g = &prepared.edit.geometry;
@@ -860,6 +947,7 @@ impl Compositor<State> for Preview {
                 gpu
             });
             gpu.detail_scale = prepared.detail_scale;
+                gpu.as_shot = prepared.as_shot;
             gpu.set_photo(f.device, f.queue, 0, prepared.size, prepared.pixels.source());
             gpu.update(f.device, f.queue, &prepared.edit);
             let g = &prepared.edit.geometry;
@@ -880,6 +968,7 @@ impl Compositor<State> for Preview {
         if s.module == Module::Develop {
             if develop.photo_id() != Some(s.photo.id) {
                 develop.set_photo(f.device, f.queue, s.photo.id, s.photo.size, s.photo.pixels.source());
+                develop.as_shot = s.photo.as_shot;
             }
             if let Some((id, pixel)) = s.probe_request.take() {
                 develop.probe(id, pixel);
@@ -895,6 +984,7 @@ impl Compositor<State> for Preview {
                 let mut gpu = Develop::new(f.device, Arc::new(Results::default()), Arc::new(|| {}));
                 gpu.histogram_enabled = false;
                 gpu.detail_scale = decoded.detail_scale;
+                gpu.as_shot = s.photo.as_shot;
                 gpu.set_photo(f.device, f.queue, s.photo.id, decoded.size, pixels.source());
                 *full = Some(gpu);
             }

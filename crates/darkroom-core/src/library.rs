@@ -46,7 +46,7 @@ impl Folder {
 /// The folder tree under `root`, keeping only folders with photos in them or below them. Hidden
 /// folders are skipped. Folders are sorted by name.
 pub fn scan(root: &Path) -> Folder {
-    let mut photos = 0;
+    let mut files = Vec::new();
     let mut dirs = Vec::new();
     if let Ok(read) = fs::read_dir(root) {
         for entry in read.flatten() {
@@ -56,11 +56,13 @@ pub fn scan(root: &Path) -> Folder {
             }
             match entry.file_type() {
                 Ok(t) if t.is_dir() => dirs.push(path),
-                Ok(_) if is_photo(&path) => photos += 1,
+                Ok(_) if is_photo(&path) => files.push(path),
                 _ => {}
             }
         }
     }
+    // A RAF and its JPEG are one photo, as the grid shows them.
+    let photos = pair_raws(files).len();
     dirs.sort();
     let children = dirs.iter().map(|d| scan(d)).filter(|f| f.photos > 0 || !f.children.is_empty()).collect();
     let name = root.file_name().map_or_else(|| root.display().to_string(), |n| n.to_string_lossy().into_owned());
@@ -85,6 +87,23 @@ pub fn photos_in(folder: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Pairs each RAF with the JPEG the camera wrote beside it (the same name up to the extension),
+/// so the two show as one photo, the RAF. Each photo to show, in the order given, with its
+/// JPEG if it has one.
+pub fn pair_raws(paths: Vec<PathBuf>) -> Vec<(PathBuf, Option<PathBuf>)> {
+    let ext = |p: &Path| p.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+    let is_raf = |p: &Path| ext(p) == "raf";
+    let is_jpeg = |p: &Path| matches!(ext(p).as_str(), "jpg" | "jpeg");
+    let stem = |p: &Path| p.with_extension("");
+    let raws: Vec<PathBuf> = paths.iter().filter(|p| is_raf(p)).map(|p| stem(p)).collect();
+    let jpegs: Vec<&PathBuf> = paths.iter().filter(|p| is_jpeg(p)).collect();
+    paths
+        .iter()
+        .filter(|p| !(is_jpeg(p) && raws.contains(&stem(p))))
+        .map(|p| (p.clone(), is_raf(p).then(|| jpegs.iter().find(|j| stem(j) == stem(p)).map(|j| (*j).clone())).flatten()))
+        .collect()
+}
+
 /// One photo as the library shows it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
@@ -96,6 +115,8 @@ pub struct Entry {
     pub flag: Flag,
     /// It has adjustments in its edit file.
     pub edited: bool,
+    /// The JPEG the camera wrote beside this RAF, shown as one photo with it.
+    pub pair: Option<PathBuf>,
 }
 
 /// Which photos to show.
@@ -233,6 +254,7 @@ mod tests {
             rating,
             flag,
             edited: false,
+            pair: None,
         }
     }
 
@@ -361,4 +383,25 @@ mod tests {
         empty.all(&[]);
         assert!(empty.is_empty());
     }
+
+    #[test]
+    fn a_raf_and_its_jpeg_show_as_one_photo() {
+        let paths = ["a/DSCF0001.JPG", "a/DSCF0001.RAF", "a/DSCF0002.jpg", "a/DSCF0003.RAF"].map(PathBuf::from).to_vec();
+        let pairs = pair_raws(paths);
+        assert_eq!(
+            pairs,
+            vec![
+                (PathBuf::from("a/DSCF0001.RAF"), Some(PathBuf::from("a/DSCF0001.JPG"))),
+                (PathBuf::from("a/DSCF0002.jpg"), None),
+                (PathBuf::from("a/DSCF0003.RAF"), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn only_the_same_name_makes_a_pair() {
+        let paths = ["DSCF0001.RAF", "DSCF0001 (2).JPG", "dscf0001.jpg"].map(PathBuf::from).to_vec();
+        assert!(pair_raws(paths).iter().all(|(_, jpeg)| jpeg.is_none()), "names differ in more than the extension");
+    }
+
 }

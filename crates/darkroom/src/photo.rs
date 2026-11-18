@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use darkroom_core::exif::Exif;
 use darkroom_core::raf;
+use darkroom_core::white::AsShot;
 use darkroom_render::Source;
 use image::{DynamicImage, ImageDecoder, ImageReader, imageops::FilterType};
 
@@ -24,6 +25,8 @@ pub struct Photo {
     /// Counts of each encoded value, 0..=255: luminance, red, green, blue. Of the unedited
     /// photo for now; the live histogram of the edit needs a GPU readback.
     pub histogram: [[u32; 256]; 4],
+    /// The white a raw file was shot at, so its Temperature and Tint read in kelvin.
+    pub as_shot: Option<AsShot>,
 }
 
 /// A photo's pixels, RGBA and tightly packed.
@@ -110,7 +113,8 @@ impl Photo {
         }
         let name = Path::new(path).file_name().map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned());
         let (size, pixels) = Pixels::from_image(img);
-        Ok(Photo { id: next_id(), name, size, full_size, exif: Exif::read(Path::new(path)), histogram: pixels.histogram(), pixels })
+        let as_shot = if raf::is_raf(Path::new(path)) { crate::raw::as_shot(Path::new(path)) } else { None };
+        Ok(Photo { id: next_id(), name, size, full_size, exif: Exif::read(Path::new(path)), histogram: pixels.histogram(), pixels, as_shot })
     }
 
     /// The photo as decoded around `pixel`, in linear light (sRGB primaries): the mean of the
@@ -155,7 +159,7 @@ impl Photo {
                 rgba.extend_from_slice(&[(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8, 255]);
             }
         }
-        Photo { id: next_id(), name: "Test chart".into(), size: [w, h], full_size: [w, h], exif: Exif::default(), histogram: histogram(&rgba), pixels: Pixels::Srgb8(rgba) }
+        Photo { id: next_id(), name: "Test chart".into(), size: [w, h], full_size: [w, h], exif: Exif::default(), as_shot: None, histogram: histogram(&rgba), pixels: Pixels::Srgb8(rgba) }
     }
 }
 

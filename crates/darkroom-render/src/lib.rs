@@ -16,6 +16,7 @@ mod readback;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use darkroom_core::white::AsShot;
 use darkroom_core::{Curves, Edit};
 
 pub use export::Exported;
@@ -190,6 +191,8 @@ pub struct Develop {
     pub detail_scale: f32,
     /// Count the histogram after each develop (off for export).
     pub histogram_enabled: bool,
+    /// The white a raw photo was shot at; its Temperature and Tint are then a real white balance.
+    pub as_shot: Option<AsShot>,
 }
 
 impl Develop {
@@ -357,6 +360,7 @@ impl Develop {
             display_p3: false,
             detail_scale: 1.0,
             histogram_enabled: true,
+            as_shot: None,
         }
     }
 
@@ -607,7 +611,7 @@ impl Develop {
             queue.write_buffer(&self.curves, 0, bytemuck::cast_slice(&lut));
             self.uploaded_curves = Some(edit.curves.clone());
         }
-        let mut params = Params::from_edit(edit);
+        let mut params = Params::from_edit_shot(edit, self.as_shot);
         if let Some([x, y]) = probe {
             params.effects[2] = x as f32;
             params.effects[3] = y as f32;

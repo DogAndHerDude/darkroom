@@ -66,3 +66,9 @@ pub const ACCENT_HOVER: Color = Color { r: 0.830770, g: 0.456411, b: 0.278894, a
 pub const ON_ACCENT: Color = Color { r: 0.017642, g: 0.008568, b: 0.004391, a: 1.0 };
 /// `danger-ink` #ff8a80
 pub const DANGER_INK: Color = Color { r: 1.000000, g: 0.254152, b: 0.215861, a: 1.0 };
+/// `danger-soft` #3f1e1b
+pub const DANGER_SOFT: Color = Color { r: 0.049707, g: 0.012983, b: 0.010960, a: 1.0 };
+/// `warning` #f0c64e
+pub const WARNING: Color = Color { r: 0.871367, g: 0.564712, b: 0.076185, a: 1.0 };
+/// `warning-soft` #3a3017
+pub const WARNING_SOFT: Color = Color { r: 0.042311, g: 0.029557, b: 0.008568, a: 1.0 };

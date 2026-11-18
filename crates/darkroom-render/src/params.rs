@@ -2,6 +2,7 @@
 //! hidden sections turned into no-ops.
 
 use darkroom_core::Edit;
+use darkroom_core::white::AsShot;
 
 /// Rec.2020 luminance weights: the working space's.
 pub const LUMA_2020: [f32; 3] = [0.2627, 0.6780, 0.0593];
@@ -62,6 +63,21 @@ impl Params {
             (true, true) => 2.0,
         };
         Params { white_balance, light, tone, color, effects: [vignette, curves, 0.0, 0.0], detail, output: [0.0; 4] }
+    }
+
+    /// [`Self::from_edit`] for a photo with a real white balance (a raw file's): Temperature and
+    /// Tint move its white away from the one it was shot at, in kelvin and off the locus.
+    pub fn from_edit_shot(e: &Edit, as_shot: Option<AsShot>) -> Params {
+        let mut p = Params::from_edit(e);
+        let c = &e.color;
+        if let Some(shot) = as_shot
+            && c.enabled
+            && (c.temperature != 0.0 || c.tint != 0.0)
+        {
+            let [r, g, b] = shot.multipliers(shot.target(c.temperature.clamp(-100.0, 100.0), c.tint.clamp(-100.0, 100.0)));
+            p.white_balance = [r, g, b, 0.0];
+        }
+        p
     }
 }
 
@@ -125,6 +141,19 @@ mod tests {
         assert_eq!(Params::from_edit(&e).effects[1], 2.0);
         e.curves.luminance = false;
         assert_eq!(Params::from_edit(&e).effects[1], 1.0);
+    }
+
+    #[test]
+    fn a_raw_white_balance_is_exactly_neutral_until_it_moves() {
+        let shot = Some(AsShot { kelvin: 5200.0, duv: 0.003 });
+        let mut e = Edit::default();
+        assert_eq!(Params::from_edit_shot(&e, shot).white_balance, [1.0, 1.0, 1.0, 0.0]);
+        e.color.temperature = 30.0;
+        let raw = Params::from_edit_shot(&e, shot).white_balance;
+        assert!(raw[0] > 1.0 && raw[2] < 1.0, "{raw:?}");
+        assert_ne!(raw, Params::from_edit(&e).white_balance, "a raw file's Temperature is in kelvin, not stops");
+        e.color.enabled = false;
+        assert_eq!(Params::from_edit_shot(&e, shot).white_balance, [1.0, 1.0, 1.0, 0.0]);
     }
 
     #[test]

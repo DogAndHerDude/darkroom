@@ -15,6 +15,7 @@ pub mod library;
 pub mod preset;
 pub mod raf;
 pub mod sidecar;
+pub mod white;
 
 pub use curve::Curve;
 pub use history::History;

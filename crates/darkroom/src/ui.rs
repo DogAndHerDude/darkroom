@@ -1,7 +1,7 @@
 //! Small pieces both modules use, built to the design system: hairlines, buttons, segmented
 //! controls, the rating stars and the top bar.
 
-use rune::{Color, El, LineCap, Path, Shape, canvas, el, row, spacer, text};
+use rune::{Color, El, LineCap, Path, Shape, canvas, col, el, row, spacer, text};
 
 use crate::theme as t;
 use crate::{Module, State};
@@ -112,6 +112,29 @@ pub fn before_after_icon(color: Color) -> Shape {
     Shape::new().stroke_path(&frame, 1.5, LineCap::Round, color).stroke(vec![[10.0, 2.5], [10.0, 17.5]], 1.5, color).view_box(20.0, 20.0)
 }
 
+/// The design's check in a 20 × 20 box: something was done.
+pub fn check_icon(color: Color) -> Shape {
+    Shape::new().stroke(vec![[4.5, 10.5], [8.0, 14.0], [15.5, 6.0]], 1.5, color).view_box(20.0, 20.0)
+}
+
+/// The design's error mark in a 20 × 20 box: a circle with an exclamation mark.
+pub fn alert_icon(color: Color) -> Shape {
+    let ring: Vec<[f32; 2]> = (0..=24).map(|i| {
+        let a = std::f32::consts::TAU * i as f32 / 24.0;
+        [10.0 + 7.5 * a.cos(), 10.0 + 7.5 * a.sin()]
+    }).collect();
+    Shape::new().stroke(ring, 1.5, color).stroke(vec![[10.0, 6.5], [10.0, 10.5]], 1.5, color).stroke(vec![[10.0, 13.4], [10.0, 13.6]], 1.8, color).view_box(20.0, 20.0)
+}
+
+/// The design's warning mark in a 20 × 20 box: a triangle with an exclamation mark.
+pub fn warning_icon(color: Color) -> Shape {
+    Shape::new()
+        .stroke(vec![[10.0, 3.5], [17.5, 16.5], [2.5, 16.5], [10.0, 3.5]], 1.5, color)
+        .stroke(vec![[10.0, 8.5], [10.0, 12.0]], 1.5, color)
+        .stroke(vec![[10.0, 14.2], [10.0, 14.4]], 1.8, color)
+        .view_box(20.0, 20.0)
+}
+
 /// A cross in a 20 × 20 box: removes something. Not in the design system yet.
 pub fn cross_icon(color: Color) -> Shape {
     Shape::new().stroke(vec![[6.0, 6.0], [14.0, 14.0]], 1.5, color).stroke(vec![[14.0, 6.0], [6.0, 14.0]], 1.5, color).view_box(20.0, 20.0)
@@ -197,7 +220,9 @@ pub const TOP_BAR: f32 = 44.0;
 /// The top bar: the module switch, a title, and whatever the module puts on the right. The
 /// window has no titlebar of its own, so macOS draws its traffic lights over the bar's left
 /// end; the switch starts `inset` points in, after them (`Cx::titlebar_inset`).
-pub fn top_bar(s: &State, inset: f32, title: String, right: El) -> El {
+/// The bar along the top: the module switch, a title with an optional line under it, `right`,
+/// and Export.
+pub fn top_bar(s: &State, inset: f32, title: String, subtitle: Option<String>, right: El) -> El {
     let switch = segmented("module", &[(Module::Library, "Library"), (Module::Develop, "Develop")], s.module, |s, m| s.switch_to(m)).self_center();
     let several = if s.module == Module::Library { s.selection().len() } else { 0 };
     row()
@@ -211,7 +236,13 @@ pub fn top_bar(s: &State, inset: f32, title: String, right: El) -> El {
         .fill(t::BG_PANEL)
         .child(switch)
         .child(spacer())
-        .child(text(title).font(t::BODY_STRONG).color(t::INK))
+        .child(
+            col()
+                .items_center()
+                .shrink()
+                .child(text(title).font(t::BODY_STRONG).color(t::INK))
+                .children(subtitle.map(|line| text(line).key("subtitle").font(t::CAPTION).color(t::INK_MUTED))),
+        )
         .child(spacer())
         .child(right)
         .child(button("export", if several > 1 { format!("Export {several} photos") } else { "Export…".to_owned() }, move |s| {

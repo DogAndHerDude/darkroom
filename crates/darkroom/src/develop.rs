@@ -1,13 +1,17 @@
 //! The Develop module: the photo, the adjustments panel, and the filmstrip of the current
 //! folder.
 
+use std::path::{Path, PathBuf};
+
+use darkroom_core::white::AsShot;
 use darkroom_core::{Edit, History, geometry, sidecar};
 use darkroom_render::{fit_aspect, neutral_point, srgb_to_rec2020};
 use rune::{Cursor, Drag, El, Key, KeyEvent, Phase, PointerEvent, ScrollSpec, SurfaceFit, TextEdit, Tx, WheelEvent, canvas, col, effect, el, row, spacer, text, text_input};
 
 use crate::curves::Picker;
 use crate::theme as t;
-use crate::ui::{before_after_icon, button, divider, eye_icon, eyedropper_icon, icon_button, icon_toggle, redo_icon, rule, segmented, stars, top_bar, undo_icon};
+use crate::ui::{alert_icon, before_after_icon, button, divider, eye_icon, eyedropper_icon, icon_button, icon_toggle, redo_icon, rule, segmented, stars, top_bar, undo_icon, warning_icon};
+use crate::library::{Note, first_line};
 use crate::{Module, PHOTO_SLOT, State, crop, curves, presets};
 
 /// Slider track width: the 300 pt panel less its 12 pt padding on each side.
@@ -61,6 +65,8 @@ pub enum Readout {
     Whole,
     /// −1.8°
     Degrees,
+    /// 5600 K: a raw file's Temperature, from the kelvin it was shot at.
+    Kelvin(f32),
 }
 
 /// One slider: its range, how its value reads, and where it lives in the edit.
@@ -219,9 +225,21 @@ impl State {
             (Module::Library, Some(p)) if self.path.as_ref() != Some(p) => sidecar::load(p),
             _ => Ok(self.edit.clone()),
         };
-        match from {
-            Ok(edit) => (self.copied, self.status) = (Some(edit), "Edits copied".into()),
-            Err(e) => self.status = format!("Couldn't read the edit file: {e}"),
+        let name = |p: &PathBuf| p.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        let source = if self.module == Module::Library { self.selected.primary.as_ref() } else { self.path.as_ref() };
+        let source = source.map(name).unwrap_or_default();
+        let note = match from {
+            Ok(edit) => {
+                (self.copied, self.status) = (Some(edit), "Edits copied".into());
+                Note { text: format!("Copied {source}'s edits"), failed: false, hint: Some("⇧⌘V pastes them onto the selection") }
+            }
+            Err(e) => {
+                self.status = format!("Couldn't read the edit file: {}", first_line(&e.to_string()));
+                Note { text: format!("Nothing copied from {source}: {}", first_line(&e.to_string())), failed: true, hint: None }
+            }
+        };
+        if self.module == Module::Library {
+            self.library_note = Some(note);
         }
     }
 
@@ -243,7 +261,9 @@ impl State {
     /// history takes the step, so ⌘Z takes the paste back once that photo is open in Develop.
     pub fn paste_onto_selected(&mut self) {
         let Some(from) = self.copied.clone() else { return };
-        for path in self.targets() {
+        let targets = self.targets();
+        let mut failed = Vec::new();
+        for path in targets.clone() {
             if self.path.as_ref() == Some(&path) {
                 self.paste_edits();
                 self.refresh_thumb();
@@ -252,14 +272,14 @@ impl State {
             let mut edit = match sidecar::load(&path) {
                 Ok(edit) => edit,
                 Err(e) => {
-                    self.status = format!("Couldn't read the edit file: {e}");
+                    failed.push((path, first_line(&e.to_string()).to_owned()));
                     continue;
                 }
             };
             let mut history = self.histories.remove(&path).filter(|h| h.is_at(&edit)).unwrap_or_else(|| History::new(&edit));
             edit.paste_look(&from);
             if let Err(e) = sidecar::save(&path, &edit) {
-                self.status = format!("Couldn't save: {e}");
+                failed.push((path, first_line(&e.to_string()).to_owned()));
                 continue;
             }
             history.record(&edit);
@@ -269,12 +289,13 @@ impl State {
             }
             self.jobs.rethumbnail(path);
         }
+        self.report(&targets, &failed, |what| format!("Pasted edits onto {what}"), Some("⌘Z in Develop takes it back, photo by photo"));
     }
 
     /// Starts typing a slider's value.
     fn start_entry(&mut self, a: Adjustment) {
         let shown = readout(a.readout, (a.get)(&self.edit));
-        let mut field = TextEdit::new(shown.trim_end_matches('°'));
+        let mut field = TextEdit::new(shown.trim_end_matches(['°', 'K']).trim_end());
         // Selected, so typing replaces the old value.
         field.set_selection(0, field.text.len());
         field.focused = true;
@@ -285,20 +306,28 @@ impl State {
     /// Ends typing: the slider takes the typed value if it is a number, kept to its range.
     pub fn commit_entry(&mut self) {
         let Some(a) = self.entry.take() else { return };
-        if let Some(v) = typed_value(&self.entry_text.text) {
+        if let Some(typed) = typed_value(&self.entry_text.text) {
+            // A kelvin is typed as itself and kept as the Temperature that reaches it.
+            let v = match a.readout {
+                Readout::Kelvin(shot) => AsShot { kelvin: shot, duv: 0.0 }.temperature_for(typed),
+                _ => typed,
+            };
             (a.set)(&mut self.edit, v.clamp(a.min, a.max));
             self.save();
         }
     }
 }
 
-/// A typed slider value: "12", "+0.35", "−18" or "1,5", with or without a degree sign.
+/// A typed slider value: "12", "+0.35", "−18", "1,5" or "5600 K", with or without a degree sign.
 fn typed_value(typed: &str) -> Option<f32> {
-    let plain = typed.trim().trim_end_matches('°').trim_start_matches('+').replace('−', "-").replace(',', ".");
+    let plain = typed.trim().trim_end_matches(['°', 'K', 'k']).trim_end().trim_start_matches('+').replace('−', "-").replace(',', ".");
     plain.parse::<f32>().ok().filter(|v| v.is_finite())
 }
 
 pub fn view(s: &State, inset: f32) -> El {
+    if let Some((path, error)) = &s.open_failed {
+        return failed_view(s, inset, path, error);
+    }
     let (shown, _) = s.view_geometry();
     let zoomed = s.zoomed();
     let mut photo = effect(PHOTO_SLOT).key("photo").on_layout(|s: &mut State, [_, _, w, h]: [f32; 4]| s.slot_pts = [w, h]);
@@ -369,7 +398,7 @@ pub fn view(s: &State, inset: f32) -> El {
     } else {
         sections
             .child(section("light", "Light", e.light.enabled, |e| e.light.enabled = !e.light.enabled, None, sliders(&LIGHT, s)))
-            .child(section("color", "Color", e.color.enabled, |e| e.color.enabled = !e.color.enabled, Some(neutral_picker(s)), sliders(&COLOR, s)))
+            .child(section("color", "Color", e.color.enabled, |e| e.color.enabled = !e.color.enabled, Some(neutral_picker(s)), color_sliders(s)))
             .child(section("curves", "Curves", e.curves.enabled, |e| e.curves.enabled = !e.curves.enabled, None, curves::body(s)))
             .child(section("detail", "Detail", e.detail.enabled, |e| e.detail.enabled = !e.detail.enabled, None, sliders(&DETAIL, s)))
             .child(presets::section(s))
@@ -425,7 +454,60 @@ pub fn view(s: &State, inset: f32) -> El {
         .child(divider());
 
     let body = row().w_full().grow(1.0).min_h(0.0).child(left).child(panel);
-    col().w_full().h_full().fill(t::BG_CANVAS).child(top_bar(s, inset, s.photo.name.clone(), history)).child(rule()).child(body)
+    col().w_full().h_full().fill(t::BG_CANVAS).child(top_bar(s, inset, s.photo.name.clone(), subtitle(s), history)).child(rule()).child(body)
+}
+
+/// The line under the photo's name: its film simulation and where it is among the photos
+/// shown, "Classic Chrome · 4 of 248", each part only when known.
+fn subtitle(s: &State) -> Option<String> {
+    let simulation = s.photo.exif.look.as_ref().and_then(|l| l.simulation.clone());
+    let visible = s.visible();
+    let place = s.target().and_then(|p| visible.iter().position(|&i| s.entries[i].path == p)).map(|i| format!("{} of {}", i + 1, visible.len()));
+    let line: Vec<String> = simulation.into_iter().chain(place).collect();
+    (!line.is_empty()).then(|| line.join(" · "))
+}
+
+/// Develop when the photo it was asked for couldn't be opened: why, in place of the photo, and
+/// the filmstrip to go on from. Nothing is open, so there is nothing to edit.
+fn failed_view(s: &State, inset: f32, path: &Path, error: &str) -> El {
+    let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let (retry, reveal) = (path.to_path_buf(), path.to_path_buf());
+    let actions = row()
+        .gap(8.0)
+        .child(button("open-again", "Try again", move |s| s.open(retry.clone())))
+        .child(
+            el().key("show-in-finder")
+                .role("button")
+                .label("Show in Finder")
+                .h(28.0)
+                .px(12.0)
+                .center()
+                .radius(7.0)
+                .hover(t::BG_HOVER)
+                .on_press(move |_: &mut State| {
+                    let _ = std::process::Command::new("open").arg("-R").arg(&reveal).spawn();
+                })
+                .child(text("Show in Finder").font(t::BODY).color(t::INK_MUTED)),
+        );
+    let body = col()
+        .gap(4.0)
+        .shrink()
+        .child(text(format!("{name} can't be opened")).font(t::BODY_STRONG).color(t::DANGER_INK))
+        .child(text(format!("{error}. The original is untouched.")).font(t::BODY).color(t::INK).wrap())
+        .child(el().h(4.0))
+        .child(actions);
+    let alert = row().key("open-failed").w(420.0).padding(12.0).gap(8.0).radius(12.0).fill(t::DANGER_SOFT).child(canvas(alert_icon(t::DANGER_INK)).size(20.0, 20.0)).child(body);
+    let stage = col().w_full().grow(1.0).min_h(0.0).padding(24.0).center().child(alert);
+    let left = col().grow(1.0).shrink().min_w(0.0).h_full().child(stage).children(filmstrip(s));
+    let panel = col()
+        .key("panel")
+        .w(300.0)
+        .h_full()
+        .padding(12.0)
+        .fill(t::BG_PANEL)
+        .child(text("Nothing to edit until the photo opens. ← → go to the next one.").font(t::CAPTION).color(t::INK_MUTED).w_full().wrap());
+    let body = row().w_full().grow(1.0).min_h(0.0).child(left).child(panel);
+    col().w_full().h_full().fill(t::BG_CANVAS).child(top_bar(s, inset, name, subtitle(s), row())).child(rule()).child(body)
 }
 
 /// The current folder's photos along the bottom, the open one framed. Click one to open it.
@@ -437,11 +519,16 @@ fn filmstrip(s: &State) -> Option<El> {
     let mut strip = row().gap(8.0).px(12.0).py(8.0).center_y();
     for i in visible {
         let entry = &s.entries[i];
-        let current = s.path.as_ref() == Some(&entry.path);
+        let current = s.target().as_ref() == Some(&entry.path);
+        let failed = s.open_failed.as_ref().is_some_and(|(p, _)| *p == entry.path);
         let path = entry.path.clone();
         let mut image = el().w(STRIP_CELL - 8.0).h(68.0).radius(4.0).fill(t::BG_PANEL);
         if let Some(img) = s.thumbs.get(&entry.path) {
             image = image.pixels_fit(img.pixels(), SurfaceFit::Fit);
+        }
+        if failed {
+            let badge = el().absolute(STRIP_CELL - 30.0, 4.0).size(18.0, 18.0).radius(4.0).center().fill(t::BG_CANVAS.alpha(0.7)).child(canvas(warning_icon(t::WARNING)).size(12.0, 12.0));
+            image = image.child(badge);
         }
         let mut cell = col()
             .key(format!("strip-{}", entry.name))
@@ -477,7 +564,8 @@ fn pick(s: &mut State, p: [f32; 2]) {
             s.probe_request = Some((id, pixel));
             s.probe_for = Some((id, point));
         }
-        Pick::Neutral => match neutral_point(srgb_to_rec2020(s.photo.linear_at(pixel))) {
+        // A raw file's white is found in kelvin and tint, the way its sliders read.
+        Pick::Neutral => match s.photo.as_shot.map_or_else(|| neutral_point(srgb_to_rec2020(s.photo.linear_at(pixel))), |shot| shot.neutralize(srgb_to_rec2020(s.photo.linear_at(pixel)))) {
             Some([temperature, tint]) => {
                 (s.edit.color.temperature, s.edit.color.tint) = (temperature.round(), tint.round());
                 s.save();
@@ -532,6 +620,32 @@ fn split_line(s: &State) -> Vec<El> {
     vec![names, line]
 }
 
+/// The Color section's sliders. A raw file's Temperature reads in kelvin, with what it was
+/// shot at under the sliders and a way back to it.
+fn color_sliders(s: &State) -> El {
+    let Some(shot) = s.photo.as_shot else { return sliders(&COLOR, s) };
+    let mut raw = COLOR;
+    raw[2].readout = Readout::Kelvin(shot.kelvin);
+    let moved = s.edit.color.temperature != 0.0 || s.edit.color.tint != 0.0;
+    let back = el()
+        .key("as-shot")
+        .role("button")
+        .label("Back to the white balance as shot")
+        .h(24.0)
+        .px(8.0)
+        .center()
+        .radius(7.0)
+        .disabled(!moved)
+        .hover(t::BG_HOVER)
+        .on_press(|s: &mut State| {
+            (s.edit.color.temperature, s.edit.color.tint) = (0.0, 0.0);
+            s.save();
+        })
+        .child(text("As shot").font(t::BODY).color(if moved { t::INK_MUTED } else { t::INK_FAINT }));
+    let line = row().w_full().center_y().child(text(format!("Shot at {:.0} K", (shot.kelvin / 50.0).round() * 50.0)).font(t::CAPTION).color(t::INK_MUTED)).child(spacer()).child(back);
+    sliders(&raw, s).child(line)
+}
+
 /// The Color section's eyedropper: the next click on the photo sets Temperature and Tint.
 fn neutral_picker(s: &State) -> El {
     icon_toggle("neutral-picker", "Pick a neutral point", eyedropper_icon, s.picker == Some(Pick::Neutral), |s| s.toggle_picker(Pick::Neutral))
@@ -561,7 +675,7 @@ fn section(key: &'static str, title: &'static str, enabled: bool, toggle: fn(&mu
     col().key(key).w_full().child(head).child(body).child(rule())
 }
 
-fn sliders(adjustments: &'static [Adjustment], s: &State) -> El {
+fn sliders(adjustments: &[Adjustment], s: &State) -> El {
     adjustments.iter().fold(col().w_full().gap(12.0), |c, a| c.child(slider(*a, s)))
 }
 
@@ -573,6 +687,7 @@ fn readout(r: Readout, v: f32) -> String {
         Readout::Whole => format!("{:+.0}", v.round()),
         Readout::Degrees if v.abs() < 0.05 => "0°".to_owned(),
         Readout::Degrees => format!("{v:+.1}°"),
+        Readout::Kelvin(shot) => format!("{:.0} K", (AsShot { kelvin: shot, duv: 0.0 }.target(v, 0.0).kelvin / 50.0).round() * 50.0),
     };
     // A real minus sign, as the design system asks.
     s.replace('-', "−")

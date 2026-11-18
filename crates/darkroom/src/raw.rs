@@ -16,9 +16,11 @@ use std::path::Path;
 use darkroom_core::camera_look::CameraLook;
 use darkroom_core::exif::Exif;
 use darkroom_core::raf;
+use darkroom_core::white::AsShot;
 use image::{DynamicImage, Rgb32FImage, metadata::Orientation};
 use rawler::decoders::RawDecodeParams;
 use rawler::imgop::develop::{Intermediate, ProcessingStep, RawDevelop};
+use rawler::imgop::xyz::Illuminant;
 use rawler::imgop::sensor::{Demosaic, SensorType};
 use rawler::imgop::sensor::xtrans::markesteijn::XTransMarkesteijnDemosaic;
 use rawler::pixarray::PixF32;
@@ -74,6 +76,50 @@ fn demosaic_xtrans(raw: &mut RawImage) -> Result<bool, String> {
 }
 
 /// The raw file as an upright, linear, sRGB-primary float image at full size.
+/// The white the camera balanced a RAF for, from its multipliers and its colour matrix for
+/// daylight. Reads the file's header only. None when the file doesn't give both.
+pub fn as_shot(path: &Path) -> Option<AsShot> {
+    let read = || {
+        let source = RawSource::new(path).ok()?;
+        let decoder = rawler::get_decoder(&source).ok()?;
+        let raw = decoder.raw_image(&source, &RawDecodeParams::default(), true).ok()?;
+        let wb = raw.wb_coeffs;
+        if wb[..3].iter().any(|c| !c.is_finite() || *c <= 0.0) {
+            return None;
+        }
+        let (_, m) = raw.color_matrix_find_first([Illuminant::D65]).filter(|(_, m)| m.len() >= 9)?;
+        let xyz_to_cam = [[m[0], m[1], m[2]], [m[3], m[4], m[5]], [m[6], m[7], m[8]]];
+        // What the camera saw as neutral, in its own channels, back to XYZ.
+        let neutral = [1.0 / wb[0], 1.0 / wb[1], 1.0 / wb[2]];
+        let xyz = solve(xyz_to_cam, neutral)?;
+        let sum = xyz[0] + xyz[1] + xyz[2];
+        let shot = (sum > 0.0).then(|| AsShot::from_xy([xyz[0] / sum, xyz[1] / sum]));
+        if std::env::var_os("DARKROOM_DEBUG").is_some() {
+            eprintln!("darkroom: {} as shot: multipliers {wb:?}, {shot:?}", path.display());
+        }
+        shot
+    };
+    // As for developing: a malformed file fails this photo, not the job thread.
+    std::panic::catch_unwind(read).ok().flatten()
+}
+
+/// `x` with `m · x = b`, by Cramer's rule; None when `m` is singular.
+fn solve(m: [[f32; 3]; 3], b: [f32; 3]) -> Option<[f32; 3]> {
+    let det = |m: [[f32; 3]; 3]| m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    let d = det(m);
+    if d.abs() < 1e-9 {
+        return None;
+    }
+    let with = |col: usize| {
+        let mut c = m;
+        for (row, v) in c.iter_mut().zip(b) {
+            row[col] = v;
+        }
+        det(c) / d
+    };
+    Some([with(0), with(1), with(2)])
+}
+
 pub fn develop(path: &Path) -> Result<DynamicImage, String> {
     // The decoder panics on some malformed files; that must fail this photo, not the job thread.
     std::panic::catch_unwind(|| develop_inner(path)).unwrap_or_else(|_| Err("the raw decoder gave up on this file".into()))

@@ -22,6 +22,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use darkroom_core::exif::Exif;
 use darkroom_core::library::{self, Entry, Folder};
+use darkroom_core::white::AsShot;
 use darkroom_core::{Edit, Flag, raf, sidecar};
 use darkroom_render::Exported;
 use image::DynamicImage;
@@ -39,7 +40,8 @@ const LONGEST: Duration = Duration::from_secs(2);
 
 pub enum Msg {
     Tree(Folder),
-    Folder { generation: u64, folder: PathBuf, entries: Vec<Entry> },
+    /// A folder's photos; `found` is false when the folder isn't there (moved, deleted, or on a drive that isn't connected).
+    Folder { generation: u64, folder: PathBuf, found: bool, entries: Vec<Entry> },
     Thumb { path: PathBuf, width: u32, height: u32, rgba: Vec<u8> },
     /// An edited photo decoded at thumbnail size, for the GPU to develop into its thumbnail.
     ThumbRender { prepared: Box<Prepared>, store: Option<ThumbStore> },
@@ -52,6 +54,8 @@ pub enum Msg {
     Exported { run: u64, index: usize, result: Result<PathBuf, String> },
     /// Photos or folders under the root changed on disk, as paths under the root as it was given.
     Changed(Vec<PathBuf>),
+    /// The root went away (a drive ejected) or came back.
+    RootThere(bool),
 }
 
 /// A photo ready to render for export: its pixels at export size (sRGB RGBA8) and its edit.
@@ -62,6 +66,8 @@ pub struct Prepared {
     pub edit: Edit,
     /// Pixels here per pixel of the preview this photo is edited on, for the detail tools.
     pub detail_scale: f32,
+    /// A raw file's white as shot, which its Temperature and Tint move from.
+    pub as_shot: Option<AsShot>,
 }
 
 /// Where an edited photo's thumbnail is cached, and the edit it will show.
@@ -110,6 +116,8 @@ pub struct Jobs {
     folder_generation: u64,
     /// Watches the root; dropping it ends the watch and its thread.
     watcher: Option<notify::RecommendedWatcher>,
+    /// Held while the root is checked for; the check stops once this goes.
+    root_check: Option<Arc<()>>,
 }
 
 impl Jobs {
@@ -127,13 +135,18 @@ impl Jobs {
                 .spawn(move || thumb_worker(&receive, &inbox, &waker, &current))
                 .expect("thumbnail worker");
         }
-        Jobs { inbox, waker, thumbs, thumb_generation, folder_generation: 0, watcher: None }
+        Jobs { inbox, waker, thumbs, thumb_generation, folder_generation: 0, watcher: None, root_check: None }
     }
 
     /// Watches `root` and everything under it, in place of any earlier root.
     pub fn watch(&mut self, root: &Path) -> Result<(), String> {
         use notify::Watcher;
         self.watcher = None;
+        self.check_root(root);
+        if !root.is_dir() {
+            // Nothing to watch until it comes back; the check says when.
+            return Ok(());
+        }
         let (send, receive) = channel::<PathBuf>();
         let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             for path in event.map(|e| e.paths).unwrap_or_default() {
@@ -161,6 +174,37 @@ impl Jobs {
             .map_err(|e| e.to_string())?;
         self.watcher = Some(watcher);
         Ok(())
+    }
+
+    /// Looks every two seconds for the root, and says when it goes or comes back. FSEvents says
+    /// nothing when the drive a watched folder is on is ejected.
+    fn check_root(&mut self, root: &Path) {
+        if self.root_check.is_some() {
+            return;
+        }
+        let token = Arc::new(());
+        let held = Arc::downgrade(&token);
+        self.root_check = Some(token);
+        let (root, inbox, waker) = (root.to_owned(), self.inbox.clone(), self.waker.clone());
+        let mut there = root.is_dir();
+        std::thread::Builder::new()
+            .name("darkroom-root-check".into())
+            .spawn(move || {
+                while held.upgrade().is_some() {
+                    std::thread::sleep(Duration::from_secs(2));
+                    let now = root.is_dir();
+                    if now != there {
+                        there = now;
+                        deliver(&inbox, &waker, Msg::RootThere(now));
+                    }
+                }
+            })
+            .expect("root check");
+    }
+
+    /// Stops watching and checking for the root, before another is chosen.
+    pub fn unwatch(&mut self) {
+        (self.watcher, self.root_check) = (None, None);
     }
 
     /// Called from `setup`, once the window can be woken. Wakes it at once for anything that
@@ -195,8 +239,8 @@ impl Jobs {
         self.folder_generation += 1;
         let generation = self.folder_generation;
         self.spawn("folder", move || {
-            let entries = library::photos_in(&folder).into_iter().map(|path| entry(&path)).collect();
-            Msg::Folder { generation, folder, entries }
+            let entries = library::pair_raws(library::photos_in(&folder)).into_iter().map(|(path, pair)| Entry { pair, ..entry(&path) }).collect();
+            Msg::Folder { generation, found: folder.is_dir(), folder, entries }
         });
         generation
     }
@@ -265,7 +309,8 @@ fn prepare(path: &Path, long_edge: Option<u32>) -> Result<Prepared, String> {
     }
     let (size, pixels) = Pixels::from_image(img);
     let detail_scale = detail_scale(full, size);
-    Ok(Prepared { path: path.to_owned(), size, pixels, edit, detail_scale })
+    let as_shot = if raf::is_raf(path) { crate::raw::as_shot(path) } else { None };
+    Ok(Prepared { path: path.to_owned(), size, pixels, edit, detail_scale, as_shot })
 }
 
 /// How many pixels of a render at `size` cover one pixel of the preview of a photo `full` in
@@ -321,6 +366,7 @@ pub fn entry(path: &Path) -> Entry {
         rating: edit.rating,
         flag: edit.flag,
         edited: edit.has_adjustments(),
+        pair: None,
     }
 }
 

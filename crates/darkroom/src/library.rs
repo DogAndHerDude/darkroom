@@ -3,14 +3,45 @@
 //! and export then act on all of them, and the details show the one clicked last. With no folder chosen yet, the first-launch screen.
 
 use darkroom_core::Flag;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use darkroom_core::library::{Entry, Selection, Show, Sort};
-use rune::{Color, Drag, El, FileDialogOptions, Mods, Phase, ScrollSpec, SurfaceFit, Tx, col, el, row, spacer, text};
+use rune::{Color, Drag, El, FileDialogOptions, Mods, Phase, ScrollSpec, SurfaceFit, Tx, canvas, col, el, row, spacer, text};
 
 use crate::theme as t;
-use crate::ui::{button, primary, rule, segmented, star, stars, top_bar, vrule};
+use crate::ui::{alert_icon, button, check_icon, primary, rule, segmented, star, stars, top_bar, vrule, warning_icon};
 use crate::{SIDEBAR_WIDTH, State};
+
+/// A line under the grid: what the last rating, flag, copy or paste did, or why it failed.
+pub struct Note {
+    pub text: String,
+    pub failed: bool,
+    /// Said on the right, after the outcome.
+    pub hint: Option<&'static str>,
+}
+
+/// The first line of an error; an edit file's parse error runs to several.
+pub fn first_line(e: &str) -> &str {
+    e.lines().next().unwrap_or(e)
+}
+
+/// The status line under the grid, while there is something to say.
+fn status_line(s: &State) -> Option<El> {
+    let note = s.library_note.as_ref()?;
+    let (icon, ink) = if note.failed { (alert_icon(t::DANGER_INK), t::DANGER_INK) } else { (check_icon(t::INK_MUTED), t::INK_MUTED) };
+    let line = row()
+        .key("library-status")
+        .w_full()
+        .h(32.0)
+        .px(16.0)
+        .gap(8.0)
+        .center_y()
+        .child(canvas(icon).size(16.0, 16.0))
+        .child(text(note.text.clone()).font(t::LABEL).color(ink).truncate_fade().shrink())
+        .child(spacer())
+        .children(note.hint.map(|h| text(h).font(t::LABEL).color(t::INK_MUTED)));
+    Some(col().w_full().child(rule()).child(line))
+}
 
 /// Thumbnail sizes the size slider runs between, in points.
 pub const THUMB_MIN: f32 = 120.0;
@@ -18,7 +49,7 @@ pub const THUMB_MAX: f32 = 240.0;
 
 pub fn view(s: &State, inset: f32) -> El {
     let Some(tree) = &s.tree else {
-        return col().w_full().h_full().fill(t::BG_CANVAS).child(top_bar(s, inset, String::new(), spacer())).child(rule()).child(welcome(s));
+        return col().w_full().h_full().fill(t::BG_CANVAS).child(top_bar(s, inset, String::new(), None, spacer())).child(rule()).child(welcome(s));
     };
 
     // Folders.
@@ -62,6 +93,7 @@ pub fn view(s: &State, inset: f32) -> El {
     let folder_name = s.folder.as_ref().and_then(|f| f.file_name()).map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let count = match (s.loading_folder, visible.len(), s.entries.len()) {
         (true, _, _) => "Loading…".to_owned(),
+        _ if s.folder_missing => "Not available".to_owned(),
         (_, v, all) if v == all => format!("{all} photos"),
         (_, v, all) => format!("{v} of {all} photos"),
     };
@@ -85,14 +117,17 @@ pub fn view(s: &State, inset: f32) -> El {
         grid = grid.child(cell(s, &s.entries[i]));
     }
     let empty = (visible.is_empty() && !s.loading_folder).then(|| {
+        if s.folder_missing && let Some(folder) = &s.folder {
+            return missing_folder(folder);
+        }
         let message = if s.entries.is_empty() { "No photos in this folder." } else { "No photos match this filter." };
         col().w_full().padding(48.0).center().child(text(message).font(t::BODY).color(t::INK_MUTED))
     });
     let grid = col().key("grid").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(grid).children(empty);
-    let center = col().grow(1.0).shrink().min_w(0.0).h_full().child(toolbar).child(rule()).child(grid);
+    let center = col().grow(1.0).shrink().min_w(0.0).h_full().child(toolbar).child(rule()).child(grid).children(status_line(s));
 
     let body = row().w_full().grow(1.0).min_h(0.0).child(sidebar).child(vrule()).child(center).child(vrule()).child(info(s));
-    col().w_full().h_full().fill(t::BG_CANVAS).child(top_bar(s, inset, String::new(), spacer())).child(rule()).child(body)
+    col().w_full().h_full().fill(t::BG_CANVAS).child(top_bar(s, inset, String::new(), None, spacer())).child(rule()).child(body)
 }
 
 fn min_rating_label(min: u8) -> String {
@@ -125,6 +160,10 @@ fn cell(s: &State, e: &Entry) -> El {
     }
     if selected {
         image = image.outline(2.0, 2.0, t::ACCENT);
+    }
+    if e.pair.is_some() {
+        let tag = el().absolute(4.0, (size - 8.0) * 2.0 / 3.0 - 22.0).px(5.0).py(1.0).radius(4.0).fill(t::BG_CANVAS.alpha(0.7)).child(text("RAF + JPG").font(t::VALUE_SM).color(t::INK));
+        image = image.child(tag);
     }
     let flag = match e.flag {
         Flag::Pick => Some(text("Pick").font(t::CAPTION).color(t::INK)),
@@ -184,7 +223,7 @@ fn info(s: &State) -> El {
                 .radius(5.0)
                 .hover(t::BG_HOVER)
                 // Clicking the current rating clears it.
-                .on_press(move |s: &mut State| s.targets().iter().for_each(|p| s.set_rating(p, if current == n { 0 } else { n })))
+                .on_press(move |s: &mut State| s.rate(if current == n { 0 } else { n }))
                 .child(star(n <= e.rating, 16.0)),
         );
     }
@@ -199,7 +238,7 @@ fn info(s: &State) -> El {
             .radius(7.0)
             .fill(if on { t::ACCENT_SOFT } else { Color::TRANSPARENT })
             .hover(if on { t::ACCENT_SOFT } else { t::BG_HOVER })
-            .on_press(move |s: &mut State| s.targets().iter().for_each(|p| s.set_flag(p, if on { Flag::None } else { flag })))
+            .on_press(move |s: &mut State| s.flag(if on { Flag::None } else { flag }))
             .child(text(label).font(t::BODY).color(if on { t::ACCENT_INK } else { t::INK_MUTED }))
     };
     let flags = row()
@@ -227,7 +266,7 @@ fn info(s: &State) -> El {
     let open = e.path.clone();
     panel
         .child(image)
-        .child(col().gap(2.0).child(text(e.name.clone()).font(t::BODY_STRONG).color(t::INK)).child(text(if e.edited { "Edited" } else { "Not edited" }).font(t::CAPTION).color(t::INK_MUTED)))
+        .child(col().gap(2.0).child(text(e.name.clone()).font(t::BODY_STRONG).color(t::INK)).child(text(format!("{}{}", if e.pair.is_some() { "RAF + JPEG · " } else { "" }, if e.edited { "Edited" } else { "Not edited" })).font(t::CAPTION).color(t::INK_MUTED)))
         .child(row().w_full().center_y().child(rating).child(spacer()).child(flags))
         .child(rule())
         .child(details)
@@ -290,6 +329,48 @@ fn change_folder_button() -> El {
         .hover(t::BG_HOVER)
         .on_press_tx(|_: &mut State, tx: &mut Tx| choose_folder(tx))
         .child(text("Change…").font(t::CAPTION).color(t::INK_MUTED))
+}
+
+/// The grid when its folder isn't there: what probably happened, and what to do.
+fn missing_folder(folder: &Path) -> El {
+    let name = folder.file_name().map_or_else(|| folder.display().to_string(), |n| n.to_string_lossy().into_owned());
+    // A folder under /Volumes/<drive> whose drive is gone was on a disk that isn't connected.
+    let drive = folder.strip_prefix("/Volumes").ok().and_then(|rest| rest.components().next()).map(|c| c.as_os_str().to_string_lossy().into_owned());
+    let why = match drive {
+        Some(d) if !Path::new("/Volumes").join(&d).exists() => format!("It was on the drive “{d}”, which isn't connected. Connect it and the folder comes back by itself."),
+        _ => "It may have been moved, renamed or deleted.".to_owned(),
+    };
+    let retry = folder.to_path_buf();
+    let actions = row()
+        .gap(8.0)
+        .child(button("look-again", "Look again", move |s| {
+            s.open_folder(retry.clone());
+            if let Some(root) = s.root.clone() {
+                s.jobs.scan(root);
+            }
+        }))
+        .child(
+            el().key("choose-root")
+                .role("button")
+                .label("Choose another library folder")
+                .h(28.0)
+                .px(12.0)
+                .center()
+                .radius(7.0)
+                .hover(t::BG_HOVER)
+                .on_press_tx(|_: &mut State, tx: &mut Tx| choose_folder(tx))
+                .child(text("Choose another library folder…").font(t::BODY).color(t::INK_MUTED)),
+        );
+    let body = col()
+        .gap(4.0)
+        .shrink()
+        .child(text(format!("Can't find “{name}”")).font(t::BODY_STRONG).color(t::WARNING))
+        .child(text(why).font(t::BODY).color(t::INK).wrap())
+        .child(text(folder.display().to_string()).font(t::VALUE_SM).color(t::INK_MUTED).wrap())
+        .child(el().h(4.0))
+        .child(actions);
+    let alert = row().key("folder-missing").w(440.0).padding(12.0).gap(8.0).radius(12.0).fill(t::WARNING_SOFT).child(canvas(warning_icon(t::WARNING)).size(20.0, 20.0)).child(body);
+    col().w_full().padding(48.0).center().child(alert)
 }
 
 fn choose_folder(tx: &mut Tx) {
