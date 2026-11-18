@@ -779,7 +779,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "darkroom"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "blake3",
  "darkroom-core",
@@ -796,7 +796,7 @@ dependencies = [
 
 [[package]]
 name = "darkroom-core"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "kamadak-exif",
  "serde",
@@ -805,7 +805,7 @@ dependencies = [
 
 [[package]]
 name = "darkroom-render"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "bytemuck",
  "darkroom-core",
