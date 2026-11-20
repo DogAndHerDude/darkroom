@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use darkroom_core::exif::Exif;
-use darkroom_core::raf;
+use darkroom_core::library;
 use darkroom_core::white::AsShot;
 use darkroom_render::Source;
 use image::{DynamicImage, ImageDecoder, ImageReader, imageops::FilterType};
@@ -76,10 +76,10 @@ impl Pixels {
     }
 }
 
-/// Decodes a photo upright at full size: a JPEG or PNG as it is, a RAF developed to a linear
+/// Decodes a photo upright at full size: a JPEG or PNG as it is, a raw file developed to a linear
 /// float image.
 pub fn decode(path: &Path) -> Result<DynamicImage, String> {
-    if raf::is_raf(path) {
+    if library::is_raw(path) {
         return crate::raw::develop(path);
     }
     let mut decoder = ImageReader::open(path).and_then(|r| r.with_guessed_format()).map_err(|e| e.to_string())?.into_decoder().map_err(|e| e.to_string())?;
@@ -108,11 +108,11 @@ fn next_id() -> u64 {
 }
 
 impl Photo {
-    /// Decodes a photo and scales it to preview size. A RAF's preview comes from the cache when
+    /// Decodes a photo and scales it to preview size. A raw file's preview comes from the cache when
     /// it was developed before.
     pub fn open(path: &str) -> Result<Photo, String> {
         let file = Path::new(path);
-        let cached = if raf::is_raf(file) { previews::path(file) } else { None };
+        let cached = if library::is_raw(file) { previews::path(file) } else { None };
         let (full_size, size, pixels) = match cached.as_deref().and_then(previews::read) {
             Some(p) => (p.full_size, p.size, Pixels::LinearHalf(p.rgba)),
             None => {
@@ -133,9 +133,9 @@ impl Photo {
             }
         };
         let name = file.file_name().map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned());
-        let as_shot = if raf::is_raf(file) { crate::raw::as_shot(file) } else { None };
+        let as_shot = if library::is_raw(file) { crate::raw::as_shot(file) } else { None };
         let camera_black_and_white = crate::raw::shot_black_and_white(file);
-        Ok(Photo { id: next_id(), name, size, full_size, exif: Exif::read(file), histogram: pixels.histogram(), pixels, as_shot, camera_black_and_white })
+        Ok(Photo { id: next_id(), name, size, full_size, exif: crate::raw::exif(file), histogram: pixels.histogram(), pixels, as_shot, camera_black_and_white })
     }
 
     /// The photo as decoded around `pixel`, in linear light (sRGB primaries): the mean of the

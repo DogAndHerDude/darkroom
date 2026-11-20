@@ -45,7 +45,7 @@ These are the working rules for this project. They matter more than speed.
 
 ## The project
 
-Darkroom is the user's personal Lightroom-like photo editor for macOS, written in Rust on the RUNE GPU-rendered UI framework (https://github.com/anomalyco/rune). It edits their own Fujifilm photos: mostly JPEG, sometimes RAF. It is a learning and enjoyment project, so clarity of the code matters as much as the feature list.
+Darkroom is the user's personal Lightroom-like photo editor for macOS, written in Rust on the RUNE GPU-rendered UI framework (https://github.com/anomalyco/rune). It edits their own Fujifilm photos: mostly JPEG, sometimes RAF. Other brands' raw files (CR3, NEF, ARW, DNG and the rest of `library::RAW_EXTENSIONS`) go through the same raw path so the app is useful to others; none has been tried yet. It is a learning and enjoyment project, so clarity of the code matters as much as the feature list.
 
 Priorities, in the user's words: RGB curves, and the Apple Photos-style basics (exposure, brilliance, highlights, shadows, black point, saturation and so on).
 
@@ -56,6 +56,7 @@ Priorities, in the user's words: RGB curves, and the Apple Photos-style basics (
 | Feature notes, status, known gaps | `README.md` (read this next) |
 | v1 feature spec | https://claude.ai/artifact/BNANWQoV2ctnippxEAnmz3 |
 | v2 spec: HSL and black & white | https://claude.ai/artifact/M9ZwpG5JHmXRs4cvaYT77L |
+| Scope: cameras beyond Fujifilm | https://claude.ai/artifact/9RosQkMu34Ko9VubKicrJh |
 | Design system "Darkroom" (`tokens.json` is the source of truth) | https://claude.ai/artifact/2AketXsxSQns3vJyx2HrM3 |
 | v1 screens | https://claude.ai/artifact/6f6zNFTt3oJi4M5i7UsryE |
 
@@ -66,7 +67,7 @@ Priorities, in the user's words: RGB curves, and the Apple Photos-style basics (
 - No Apple Photos integration, no HEIC, no cloud sync.
 - One dark theme. Fonts are Rubik and DM Mono; accent `#e2a27a`.
 - Working space is linear Rec.2020 in `Rgba16Float`; curves run on display (sRGB-primary) channels; out-of-gamut colour is brought in by reducing Oklab chroma (the amount comes from a straight line in linear RGB; searching along the Oklab chroma line made a step in blues).
-- RAF is decoded with `rawler`, using its Markesteijn demosaic for X-Trans.
+- Raw files are decoded with `rawler`: its Markesteijn demosaic for X-Trans, its develop path (PPG) for Bayer. Previews and metadata of raws other than RAF come from `rawler` too; RAF keeps its own reader for the embedded JPEG and Fujifilm's MakerNote.
 - A RAF starts in the camera's look: tone and chroma curves fitted per photo against its embedded JPEG (by distribution, since the JPEG is lens-corrected and the raw isn't), baked in at decode; black and white comes from the MakerNote.
 
 ### Workspace

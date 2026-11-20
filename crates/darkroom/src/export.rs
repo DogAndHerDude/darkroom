@@ -10,7 +10,7 @@ use std::io::{BufReader, BufWriter, Cursor};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use darkroom_core::raf;
+use darkroom_core::{library, raf};
 use darkroom_render::Exported;
 use image::{ExtendedColorType, ImageEncoder};
 use rune::{El, FileDialogOptions, Tx, col, el, row, spacer, text};
@@ -139,6 +139,10 @@ pub fn tables() -> &'static (Vec<u8>, Vec<u16>) {
 /// already upright).
 fn camera_exif(source: &Path) -> Option<Vec<u8>> {
     use exif::{In, Tag};
+    // Other raw formats are read by `rawler`, as for the info panel.
+    if library::is_raw(source) && !raf::is_raf(source) {
+        return write_exif(&crate::raw::camera_fields(source)?);
+    }
     // A RAF keeps its EXIF in the JPEG the camera embedded.
     let data = if raf::is_raf(source) {
         exif::Reader::new().read_from_container(&mut Cursor::new(raf::embedded_jpeg(source)?)).ok()?
@@ -158,12 +162,17 @@ fn camera_exif(source: &Path) -> Option<Vec<u8>> {
         Tag::FocalLength,
         Tag::ExposureBiasValue,
     ];
-    let fields: Vec<&exif::Field> = KEEP.iter().filter_map(|&tag| data.get_field(tag, In::PRIMARY)).collect();
+    let fields: Vec<exif::Field> = KEEP.iter().filter_map(|&tag| data.get_field(tag, In::PRIMARY)).cloned().collect();
+    write_exif(&fields)
+}
+
+/// `fields` as an EXIF block (TIFF structure). None when there are none.
+fn write_exif(fields: &[exif::Field]) -> Option<Vec<u8>> {
     if fields.is_empty() {
         return None;
     }
     let mut writer = exif::experimental::Writer::new();
-    for f in &fields {
+    for f in fields {
         writer.push_field(f);
     }
     let mut out = Cursor::new(Vec::new());

@@ -20,10 +20,9 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use darkroom_core::exif::Exif;
 use darkroom_core::library::{self, Entry, Folder};
 use darkroom_core::white::AsShot;
-use darkroom_core::{Edit, Flag, raf, sidecar};
+use darkroom_core::{Edit, Flag, sidecar};
 use darkroom_render::Exported;
 use image::DynamicImage;
 use rune::Waker;
@@ -311,7 +310,7 @@ fn prepare(path: &Path, long_edge: Option<u32>) -> Result<Prepared, String> {
     }
     let (size, pixels) = Pixels::from_image(img);
     let detail_scale = detail_scale(full, size);
-    let as_shot = if raf::is_raf(path) { crate::raw::as_shot(path) } else { None };
+    let as_shot = if library::is_raw(path) { crate::raw::as_shot(path) } else { None };
     let camera_black_and_white = crate::raw::shot_black_and_white(path);
     Ok(Prepared { path: path.to_owned(), size, pixels, edit, detail_scale, as_shot, camera_black_and_white })
 }
@@ -321,17 +320,6 @@ fn prepare(path: &Path, long_edge: Option<u32>) -> Result<Prepared, String> {
 fn detail_scale(full: [u32; 2], size: [u32; 2]) -> f32 {
     let long = |[w, h]: [u32; 2]| w.max(h).max(1) as f32;
     long(size) / long(full).min(photo::PREVIEW_EDGE as f32)
-}
-
-/// The JPEG inside a RAF, decoded upright.
-fn embedded(path: &Path) -> Option<DynamicImage> {
-    use image::ImageDecoder;
-    let jpeg = raf::embedded_jpeg(path)?;
-    let mut decoder = image::ImageReader::new(std::io::Cursor::new(jpeg)).with_guessed_format().ok()?.into_decoder().ok()?;
-    let orientation = decoder.orientation().ok()?;
-    let mut img = DynamicImage::from_decoder(decoder).ok()?;
-    img.apply_orientation(orientation);
-    Some(img)
 }
 
 /// The paths of the next burst of changes: from the first until none has come for [`QUIET`],
@@ -365,7 +353,7 @@ pub fn entry(path: &Path) -> Entry {
         path: path.to_owned(),
         name: path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
         modified: std::fs::metadata(path).and_then(|m| m.modified()).ok(),
-        exif: Exif::read(path),
+        exif: crate::raw::exif(path),
         rating: edit.rating,
         flag: edit.flag,
         edited: edit.has_adjustments(),
@@ -387,7 +375,7 @@ fn thumb_worker(receive: &Mutex<Receiver<ThumbJob>>, inbox: &Mutex<Vec<Msg>>, wa
     }
 }
 
-/// Darkroom's folder of caches: thumbnails and developed RAF previews.
+/// Darkroom's folder of caches: thumbnails and developed raw previews.
 pub fn caches() -> PathBuf {
     std::env::var_os("HOME").map_or_else(std::env::temp_dir, |h| PathBuf::from(h).join("Library/Caches")).join("darkroom")
 }
@@ -480,8 +468,12 @@ fn thumbnail(path: &Path) -> Option<Thumb> {
     if let Some(img) = cached.as_ref().and_then(|c| image::open(c).ok()) {
         return Some(Thumb::ready(img));
     }
-    // A RAF's thumbnail is the JPEG the camera embedded: far quicker than developing it.
-    let img = if raf::is_raf(path) { embedded(path)? } else { photo::decode(path).ok()? };
+    // A raw file's thumbnail is the JPEG the camera embedded: far quicker than developing it. One
+    // without (an ORF, to `rawler`) is developed.
+    let img = match library::is_raw(path).then(|| crate::raw::upright_preview(path)).flatten() {
+        Some(img) => img,
+        None => photo::decode(path).ok()?,
+    };
     let small = img.thumbnail(THUMB_EDGE, THUMB_EDGE).into_rgb8();
     if let Some(c) = cached {
         let _ = std::fs::create_dir_all(cache_dir());

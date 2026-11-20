@@ -1,12 +1,12 @@
-//! Each RAF's developed preview, kept on disk (`~/Library/Caches/darkroom/previews`), so a RAF
-//! opened before opens in a moment instead of being developed again for several seconds.
+//! Each raw file's developed preview, kept on disk (`~/Library/Caches/darkroom/previews`), so a
+//! raw file opened before opens in a moment instead of being developed again for several seconds.
 //!
 //! A preview is stored as the half floats Develop works on, not re-encoded, so a cached one is
-//! bit for bit what developing gives. That makes each about 26 MB for a 26 MP photo, so the
+//! bit for bit what developing gives. That makes each about 26 MB for a 3:2 photo, so the
 //! folder is kept under [`LIMIT`], the least recently opened going first.
 //!
 //! A preview is keyed by the photo's path, size and modification time, as a thumbnail is, and
-//! by the app's version and [`FORMAT`]. A change to how a RAF is developed must bump `FORMAT`,
+//! by the app's version and [`FORMAT`]. A change to how a raw file is developed must bump `FORMAT`,
 //! or previews cached before it go on being shown until the next release.
 
 use std::fs::{self, File};
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 const MAGIC: &[u8; 4] = b"DRPV";
-/// Bump when a RAF develops differently, so previews cached before aren't used.
+/// Bump when a raw file develops differently, so previews cached before aren't used.
 const FORMAT: u32 = 2;
 /// Magic, format, full size and size.
 const HEADER: usize = 24;

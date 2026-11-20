@@ -9,10 +9,23 @@ use crate::Flag;
 use crate::exif::Exif;
 
 /// File types the library lists (lowercase).
-pub const PHOTO_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "raf"];
+pub const PHOTO_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "raf", "cr3", "cr2", "nef", "arw", "dng", "rwl", "rw2", "orf", "pef"];
+
+/// Camera raw files (lowercase): Fujifilm, Canon (CR3, and CR2 before 2018), Nikon, Sony, Leica
+/// (DNG, and RWL on older compacts), Panasonic, OM System and Olympus, Pentax. All of them are
+/// developed by `rawler` in the app.
+pub const RAW_EXTENSIONS: &[&str] = &["raf", "cr3", "cr2", "nef", "arw", "dng", "rwl", "rw2", "orf", "pef"];
+
+fn extension(path: &Path) -> String {
+    path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default()
+}
 
 pub fn is_photo(path: &Path) -> bool {
-    path.extension().and_then(|e| e.to_str()).is_some_and(|e| PHOTO_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+    PHOTO_EXTENSIONS.contains(&extension(path).as_str())
+}
+
+pub fn is_raw(path: &Path) -> bool {
+    RAW_EXTENSIONS.contains(&extension(path).as_str())
 }
 
 fn hidden(path: &Path) -> bool {
@@ -87,20 +100,18 @@ pub fn photos_in(folder: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Pairs each RAF with the JPEG the camera wrote beside it (the same name up to the extension),
-/// so the two show as one photo, the RAF. Each photo to show, in the order given, with its
-/// JPEG if it has one.
+/// Pairs each raw file with the JPEG the camera wrote beside it (the same name up to the
+/// extension), so the two show as one photo, the raw. Each photo to show, in the order given,
+/// with its JPEG if it has one.
 pub fn pair_raws(paths: Vec<PathBuf>) -> Vec<(PathBuf, Option<PathBuf>)> {
-    let ext = |p: &Path| p.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
-    let is_raf = |p: &Path| ext(p) == "raf";
-    let is_jpeg = |p: &Path| matches!(ext(p).as_str(), "jpg" | "jpeg");
+    let is_jpeg = |p: &Path| matches!(extension(p).as_str(), "jpg" | "jpeg");
     let stem = |p: &Path| p.with_extension("");
-    let raws: Vec<PathBuf> = paths.iter().filter(|p| is_raf(p)).map(|p| stem(p)).collect();
+    let raws: Vec<PathBuf> = paths.iter().filter(|p| is_raw(p)).map(|p| stem(p)).collect();
     let jpegs: Vec<&PathBuf> = paths.iter().filter(|p| is_jpeg(p)).collect();
     paths
         .iter()
         .filter(|p| !(is_jpeg(p) && raws.contains(&stem(p))))
-        .map(|p| (p.clone(), is_raf(p).then(|| jpegs.iter().find(|j| stem(j) == stem(p)).map(|j| (*j).clone())).flatten()))
+        .map(|p| (p.clone(), is_raw(p).then(|| jpegs.iter().find(|j| stem(j) == stem(p)).map(|j| (*j).clone())).flatten()))
         .collect()
 }
 
@@ -115,7 +126,7 @@ pub struct Entry {
     pub flag: Flag,
     /// It has adjustments in its edit file.
     pub edited: bool,
-    /// The JPEG the camera wrote beside this RAF, shown as one photo with it.
+    /// The JPEG the camera wrote beside this raw file, shown as one photo with it.
     pub pair: Option<PathBuf>,
 }
 
@@ -262,6 +273,10 @@ mod tests {
     fn photos_are_recognised_by_extension_in_any_case() {
         assert!(is_photo(Path::new("DSCF4127.JPG")) && is_photo(Path::new("a.jpeg")) && is_photo(Path::new("b.png")));
         assert!(!is_photo(Path::new("DSCF4127.JPG.darkroom")) && is_photo(Path::new("DSCF4127.RAF")));
+        for raw in ["IMG_0001.CR3", "IMG_0001.cr2", "DSC_0001.NEF", "DSC00001.ARW", "L1000001.DNG", "P1000001.RW2", "P1000001.ORF", "IMGP0001.PEF"] {
+            assert!(is_photo(Path::new(raw)) && is_raw(Path::new(raw)), "{raw}");
+        }
+        assert!(!is_raw(Path::new("IMG_0001.JPG")) && !is_raw(Path::new("IMG_0001.HEIC")) && !is_photo(Path::new("IMG_0001.HEIC")));
     }
 
     #[test]
@@ -394,6 +409,19 @@ mod tests {
                 (PathBuf::from("a/DSCF0001.RAF"), Some(PathBuf::from("a/DSCF0001.JPG"))),
                 (PathBuf::from("a/DSCF0002.jpg"), None),
                 (PathBuf::from("a/DSCF0003.RAF"), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn any_raw_and_its_jpeg_show_as_one_photo() {
+        let paths = ["IMG_0001.CR3", "IMG_0001.JPG", "DSC_0002.NEF", "DSC_0002.jpg", "DSC00003.ARW"].map(PathBuf::from).to_vec();
+        assert_eq!(
+            pair_raws(paths),
+            vec![
+                (PathBuf::from("IMG_0001.CR3"), Some(PathBuf::from("IMG_0001.JPG"))),
+                (PathBuf::from("DSC_0002.NEF"), Some(PathBuf::from("DSC_0002.jpg"))),
+                (PathBuf::from("DSC00003.ARW"), None),
             ]
         );
     }

@@ -24,7 +24,38 @@ pub struct Exif {
     pub look: Option<Look>,
 }
 
+/// Shooting details as numbers, for a source other than an EXIF block (a raw file's metadata,
+/// read by the app's decoder). [`Exif::from_parts`] formats them as [`Exif::read`] would.
+#[derive(Clone, Debug, Default)]
+pub struct Parts {
+    pub taken: Option<String>,
+    pub make: Option<String>,
+    pub model: Option<String>,
+    pub lens: Option<String>,
+    pub f_number: Option<f64>,
+    /// Seconds.
+    pub exposure_time: Option<f64>,
+    pub iso: Option<u32>,
+    /// Millimetres.
+    pub focal_length: Option<f64>,
+}
+
 impl Exif {
+    pub fn from_parts(p: Parts) -> Exif {
+        let text = |s: Option<String>| s.map(|s| s.trim_end_matches('\0').trim().to_owned()).filter(|s| !s.is_empty());
+        let positive = |v: Option<f64>| v.filter(|v| v.is_finite() && *v > 0.0);
+        Exif {
+            taken: text(p.taken),
+            camera: camera_name(text(p.make), text(p.model)),
+            lens: text(p.lens),
+            aperture: positive(p.f_number).map(|f| format!("ƒ/{}", trim(f, 1))),
+            shutter: positive(p.exposure_time).map(shutter),
+            iso: p.iso.filter(|&n| n > 0).map(|n| format!("ISO {n}")),
+            focal_length: positive(p.focal_length).map(|f| format!("{} mm", trim(f, 0))),
+            look: None,
+        }
+    }
+
     /// The photo's EXIF, or an empty one when it has none or can't be read.
     pub fn read(path: &Path) -> Exif {
         // A RAF's EXIF is in the JPEG the camera embedded.
@@ -36,14 +67,7 @@ impl Exif {
         let Some(data) = read else { return Exif::default() };
         let field = |tag| data.get_field(tag, In::PRIMARY).map(|f| &f.value);
         let text = |tag| field(tag).and_then(ascii);
-        let make = text(Tag::Make);
-        let model = text(Tag::Model);
-        let camera = match (make, model) {
-            // "FUJIFILM" + "X-T5" reads as "Fujifilm X-T5"; skip the make when the model has it.
-            (Some(make), Some(model)) if !model.to_lowercase().starts_with(&make.to_lowercase()) => Some(format!("{} {model}", title_case(&make))),
-            (_, Some(model)) => Some(model),
-            (make, None) => make,
-        };
+        let camera = camera_name(text(Tag::Make), text(Tag::Model));
         Exif {
             taken: text(Tag::DateTimeOriginal).or_else(|| text(Tag::DateTime)),
             camera,
@@ -59,6 +83,16 @@ impl Exif {
     /// "ƒ/2.8 · 1/250 s · ISO 400 · 23 mm", with whatever is present.
     pub fn exposure_line(&self) -> String {
         [&self.aperture, &self.shutter, &self.iso, &self.focal_length].iter().filter_map(|v| v.as_deref()).collect::<Vec<_>>().join(" · ")
+    }
+}
+
+/// "FUJIFILM" and "X-T5" read as "Fujifilm X-T5"; the make is left out when the model starts
+/// with it ("Canon" and "Canon EOS R5").
+fn camera_name(make: Option<String>, model: Option<String>) -> Option<String> {
+    match (make, model) {
+        (Some(make), Some(model)) if !model.to_lowercase().starts_with(&make.to_lowercase()) => Some(format!("{} {model}", title_case(&make))),
+        (_, Some(model)) => Some(model),
+        (make, None) => make,
     }
 }
 
@@ -112,6 +146,24 @@ mod tests {
     fn the_exposure_line_joins_what_is_present() {
         let e = Exif { aperture: Some("ƒ/2.8".into()), iso: Some("ISO 400".into()), ..Exif::default() };
         assert_eq!(e.exposure_line(), "ƒ/2.8 · ISO 400");
+    }
+
+    #[test]
+    fn parts_read_as_an_exif_block_would() {
+        let p = Parts {
+            make: Some("SONY".into()),
+            model: Some("ILCE-7RM5".into()),
+            f_number: Some(2.8),
+            exposure_time: Some(1.0 / 250.0),
+            iso: Some(400),
+            focal_length: Some(35.0),
+            ..Parts::default()
+        };
+        let e = Exif::from_parts(p);
+        assert_eq!(e.camera.as_deref(), Some("Sony ILCE-7RM5"));
+        assert_eq!(e.exposure_line(), "ƒ/2.8 · 1/250 s · ISO 400 · 35 mm");
+        let canon = Exif::from_parts(Parts { make: Some("Canon".into()), model: Some("Canon EOS R5".into()), f_number: Some(0.0), ..Parts::default() });
+        assert_eq!((canon.camera.as_deref(), canon.aperture), (Some("Canon EOS R5"), None), "no make twice; an unknown aperture is left out");
     }
 
     #[test]

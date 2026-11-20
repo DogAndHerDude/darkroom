@@ -1,4 +1,6 @@
-//! Developing a camera raw file (Fujifilm RAF) into linear pixels the pipeline can take.
+//! Developing a camera raw file (Fujifilm RAF, Canon CR3 and CR2, Nikon NEF, Sony ARW, DNG and
+//! the others `library::RAW_EXTENSIONS` lists) into linear pixels the pipeline can take, and
+//! reading what else the file carries: the camera's JPEG preview and the shooting details.
 //!
 //! `rawler` reads the sensor data and does the camera-specific part: black and white levels,
 //! demosaicing (Markesteijn's method for X-Trans sensors), the camera's white balance and its
@@ -13,12 +15,12 @@
 
 use std::path::Path;
 
-use darkroom_core::camera_look::CameraLook;
-use darkroom_core::exif::Exif;
-use darkroom_core::raf;
+use darkroom_core::camera_look::{self, CameraLook};
+use darkroom_core::exif::{Exif, Parts};
+use darkroom_core::{library, raf};
 use darkroom_core::white::AsShot;
 use image::{DynamicImage, Rgb32FImage, metadata::Orientation};
-use rawler::decoders::RawDecodeParams;
+use rawler::decoders::{RawDecodeParams, RawMetadata};
 use rawler::imgop::develop::{Intermediate, ProcessingStep, RawDevelop};
 use rawler::imgop::xyz::Illuminant;
 use rawler::imgop::sensor::{Demosaic, SensorType};
@@ -103,10 +105,106 @@ pub fn as_shot(path: &Path) -> Option<AsShot> {
     std::panic::catch_unwind(read).ok().flatten()
 }
 
-/// Whether a RAF was shot in a monochrome simulation, so it opens in black and white. The colour
-/// is kept at decode, for the mixer; a JPEG has none left, so it never counts.
+/// Whether a raw file was shot in black and white, so it opens with Black & White on. A RAF says
+/// so in Fujifilm's MakerNote (Acros, Monochrome); for other brands, whose maker notes Darkroom
+/// doesn't read, the camera's preview having no colour does. The colour is kept at decode, for
+/// the mixer; a JPEG has none left, so it never counts.
 pub fn shot_black_and_white(path: &Path) -> bool {
-    raf::is_raf(path) && Exif::read(path).look.is_some_and(|l| l.is_black_and_white())
+    if raf::is_raf(path) {
+        return Exif::read(path).look.is_some_and(|l| l.is_black_and_white());
+    }
+    library::is_raw(path) && preview(path).is_some_and(|p| camera_look::is_monochrome(&linear(&p.thumbnail(FIT_EDGE as u32, FIT_EDGE as u32))))
+}
+
+/// What `rawler` reads of a raw file's metadata. None when it can't.
+fn metadata(path: &Path) -> Option<RawMetadata> {
+    let read = || {
+        let source = RawSource::new(path).ok()?;
+        rawler::get_decoder(&source).ok()?.raw_metadata(&source, &RawDecodeParams::default()).ok()
+    };
+    std::panic::catch_unwind(read).ok().flatten()
+}
+
+/// A photo's shooting details. A JPEG's and a RAF's come from their EXIF block, with Fujifilm's
+/// film simulation; any other raw file's from `rawler`, which reads every format it decodes
+/// (CR3 isn't TIFF-based, and RW2 keeps its EXIF in an embedded JPEG).
+pub fn exif(path: &Path) -> Exif {
+    if !library::is_raw(path) || raf::is_raf(path) {
+        return Exif::read(path);
+    }
+    let Some(m) = metadata(path) else { return Exif::default() };
+    let ratio = |r: Option<rawler::formats::tiff::Rational>| r.filter(|r| r.d != 0).map(|r| r.n as f64 / r.d as f64);
+    let e = &m.exif;
+    Exif::from_parts(Parts {
+        taken: e.date_time_original.clone().or_else(|| e.create_date.clone()),
+        make: Some(m.make.clone()),
+        model: Some(m.model.clone()),
+        lens: e.lens_model.clone().or_else(|| m.lens.as_ref().map(|l| l.lens_model.clone())),
+        f_number: ratio(e.fnumber),
+        exposure_time: ratio(e.exposure_time),
+        iso: e.iso_speed_ratings.map(u32::from).or(e.recommended_exposure_index).or(e.iso_speed),
+        focal_length: ratio(e.focal_length),
+    })
+}
+
+/// What an export carries over from a raw file other than a RAF, as EXIF fields: camera, lens,
+/// exposure, focal length and capture time, from `rawler`. The make and model are `rawler`'s
+/// cleaned-up names ("Sony", not "SONY"). None when it can't read the file.
+pub fn camera_fields(path: &Path) -> Option<Vec<exif::Field>> {
+    use exif::{Field, In, Tag, Value};
+    let m = metadata(path)?;
+    let e = &m.exif;
+    let ascii = |tag, s: &str| Field { tag, ifd_num: In::PRIMARY, value: Value::Ascii(vec![s.as_bytes().to_vec()]) };
+    let ratio = |tag, r: rawler::formats::tiff::Rational| Field { tag, ifd_num: In::PRIMARY, value: Value::Rational(vec![exif::Rational { num: r.n, denom: r.d }]) };
+    let mut fields = vec![ascii(Tag::Make, &m.make), ascii(Tag::Model, &m.model)];
+    fields.extend(e.lens_make.as_deref().map(|s| ascii(Tag::LensMake, s)));
+    fields.extend(e.lens_model.as_deref().map(|s| ascii(Tag::LensModel, s)));
+    fields.extend(e.date_time_original.as_deref().map(|s| ascii(Tag::DateTimeOriginal, s)));
+    fields.extend(e.offset_time_original.as_deref().map(|s| ascii(Tag::OffsetTimeOriginal, s)));
+    fields.extend(e.fnumber.map(|r| ratio(Tag::FNumber, r)));
+    fields.extend(e.exposure_time.map(|r| ratio(Tag::ExposureTime, r)));
+    fields.extend(e.focal_length.map(|r| ratio(Tag::FocalLength, r)));
+    fields.extend(e.iso_speed_ratings.map(|n| Field { tag: Tag::PhotographicSensitivity, ifd_num: In::PRIMARY, value: Value::Short(vec![n]) }));
+    fields.extend(e.exposure_bias.map(|r| Field { tag: Tag::ExposureBiasValue, ifd_num: In::PRIMARY, value: Value::SRational(vec![exif::SRational { num: r.n, denom: r.d }]) }));
+    Some(fields)
+}
+
+/// The camera's own JPEG of a raw file, its pixels as stored (not turned upright): a RAF's from
+/// Darkroom's own reader, any other's from `rawler`. None when there is none, or `rawler` can't
+/// find it (it has no preview reader for ORF).
+pub fn preview(path: &Path) -> Option<DynamicImage> {
+    if raf::is_raf(path) {
+        return image::load_from_memory_with_format(&raf::embedded_jpeg(path)?, image::ImageFormat::Jpeg).ok();
+    }
+    let read = || {
+        let source = RawSource::new(path).ok()?;
+        rawler::get_decoder(&source).ok()?.preview_image(&source, &RawDecodeParams::default()).ok().flatten()
+    };
+    std::panic::catch_unwind(read).ok().flatten()
+}
+
+/// The camera's JPEG turned upright, for a thumbnail: by the JPEG's own orientation for a RAF,
+/// by the raw file's for the others.
+pub fn upright_preview(path: &Path) -> Option<DynamicImage> {
+    use image::ImageDecoder;
+    if raf::is_raf(path) {
+        let mut decoder = image::ImageReader::new(std::io::Cursor::new(raf::embedded_jpeg(path)?)).with_guessed_format().ok()?.into_decoder().ok()?;
+        let orientation = decoder.orientation().ok()?;
+        let mut img = DynamicImage::from_decoder(decoder).ok()?;
+        img.apply_orientation(orientation);
+        return Some(img);
+    }
+    let mut img = preview(path)?;
+    if let Some(o) = metadata(path).and_then(|m| m.exif.orientation).and_then(|o| u8::try_from(o).ok()).and_then(Orientation::from_exif) {
+        img.apply_orientation(o);
+    }
+    Some(img)
+}
+
+/// An image's pixels as linear sRGB.
+fn linear(img: &DynamicImage) -> Vec<[f32; 3]> {
+    let decode: Vec<f32> = (0..=255u8).map(srgb_decode).collect();
+    img.to_rgb8().pixels().map(|p| p.0.map(|b| decode[b as usize])).collect()
 }
 
 /// `x` with `m · x = b`, by Cramer's rule; None when `m` is singular.
@@ -170,8 +268,7 @@ fn develop_inner(path: &Path) -> Result<DynamicImage, String> {
 /// image, `w` × `h`, not yet turned upright, as the JPEG's pixels are stored. None when there is
 /// no JPEG, it frames the photo differently, or the fit isn't trusted.
 fn camera_look(path: &Path, rgb: &[f32], w: usize, h: usize) -> Option<CameraLook> {
-    let bytes = raf::embedded_jpeg(path)?;
-    let jpeg = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).ok()?.into_rgb8();
+    let jpeg = preview(path)?.into_rgb8();
     let (jw, jh) = (jpeg.width() as usize, jpeg.height() as usize);
     if (jw as f32 / jh as f32 - w as f32 / h as f32).abs() > 0.01 {
         return None;
@@ -181,7 +278,7 @@ fn camera_look(path: &Path, rgb: &[f32], w: usize, h: usize) -> Option<CameraLoo
     let decode: Vec<f32> = (0..=255u8).map(srgb_decode).collect();
     let pixels = jpeg.as_raw();
     let camera = centre(&shrink(|i| [pixels[3 * i], pixels[3 * i + 1], pixels[3 * i + 2]].map(|b| decode[b as usize]), jw, jh, fw, fh), fw, fh);
-    let black_and_white = Exif::read(path).look.is_some_and(|l| l.is_black_and_white());
+    let black_and_white = if raf::is_raf(path) { Exif::read(path).look.is_some_and(|l| l.is_black_and_white()) } else { camera_look::is_monochrome(&camera) };
     let look = CameraLook::fit(&raw, &camera, black_and_white);
     if std::env::var_os("DARKROOM_DEBUG").is_some() {
         eprintln!("camera look: raw {w}×{h}, jpeg {jw}×{jh}, black and white {black_and_white}: {look:?}");

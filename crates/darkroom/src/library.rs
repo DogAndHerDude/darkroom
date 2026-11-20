@@ -162,7 +162,7 @@ fn cell(s: &State, e: &Entry) -> El {
         image = image.outline(2.0, 2.0, t::ACCENT);
     }
     if e.pair.is_some() {
-        let tag = el().absolute(4.0, (size - 8.0) * 2.0 / 3.0 - 22.0).px(5.0).py(1.0).radius(4.0).fill(t::BG_CANVAS.alpha(0.7)).child(text("RAF + JPG").font(t::VALUE_SM).color(t::INK));
+        let tag = el().absolute(4.0, (size - 8.0) * 2.0 / 3.0 - 22.0).px(5.0).py(1.0).radius(4.0).fill(t::BG_CANVAS.alpha(0.7)).child(text(format!("{} + JPG", raw_kind(&e.path))).font(t::VALUE_SM).color(t::INK));
         image = image.child(tag);
     }
     let flag = match e.flag {
@@ -266,7 +266,7 @@ fn info(s: &State) -> El {
     let open = e.path.clone();
     panel
         .child(image)
-        .child(col().gap(2.0).child(text(e.name.clone()).font(t::BODY_STRONG).color(t::INK)).child(text(format!("{}{}", if e.pair.is_some() { "RAF + JPEG · " } else { "" }, if e.edited { "Edited" } else { "Not edited" })).font(t::CAPTION).color(t::INK_MUTED)))
+        .child(col().gap(2.0).child(text(e.name.clone()).font(t::BODY_STRONG).color(t::INK)).child(text(format!("{}{}", if e.pair.is_some() { format!("{} + JPEG · ", raw_kind(&e.path)) } else { String::new() }, if e.edited { "Edited" } else { "Not edited" })).font(t::CAPTION).color(t::INK_MUTED)))
         .child(row().w_full().center_y().child(rating).child(spacer()).child(flags))
         .child(rule())
         .child(details)
@@ -393,6 +393,11 @@ fn welcome(s: &State) -> El {
         .child(text("Darkroom reads your photos straight from a folder. Your edits are saved beside each photo, and the originals are never changed.").font(t::BODY).color(t::INK_MUTED).w(420.0).wrap().align(rune::Align::Center))
         .child(primary("choose-folder", "Choose folder").on_press_tx(|_: &mut State, tx: &mut Tx| choose_folder(tx)))
         .children((!s.status.is_empty()).then(|| text(s.status.clone()).font(t::CAPTION).color(t::INK_MUTED)))
+}
+
+/// A raw file's kind as its extension names it: "RAF", "CR3", "NEF".
+fn raw_kind(path: &std::path::Path) -> String {
+    path.extension().map_or_else(String::new, |e| e.to_string_lossy().to_uppercase())
 }
 
 #[cfg(test)]

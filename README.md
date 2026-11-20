@@ -1,6 +1,6 @@
 # Darkroom
 
-A personal, non-destructive photo editor for Fujifilm JPEGs and the occasional RAF, written in Rust on the [RUNE](https://github.com/anomalyco/rune) GPU UI framework.
+A personal, non-destructive photo editor for Fujifilm JPEGs and RAFs, and (untried) other brands' raw files, written in Rust on the [RUNE](https://github.com/anomalyco/rune) GPU UI framework.
 
 Browse a folder, edit with Apple Photos-style adjustments plus proper RGB curves, then export. Originals are never touched: each photo's edits live in a sidecar file next to it.
 
@@ -10,6 +10,7 @@ Browse a folder, edit with Apple Photos-style adjustments plus proper RGB curves
 | --- | --- |
 | v1 feature spec | [Claude Doc](https://claude.ai/artifact/BNANWQoV2ctnippxEAnmz3) |
 | v2 spec: HSL and black & white | [Claude Doc](https://claude.ai/artifact/M9ZwpG5JHmXRs4cvaYT77L) |
+| Scope: cameras beyond Fujifilm | [Claude Doc](https://claude.ai/artifact/9RosQkMu34Ko9VubKicrJh) |
 | Design system ("Darkroom") | [Design system](https://claude.ai/artifact/2AketXsxSQns3vJyx2HrM3): `tokens.json` is the source of truth |
 | v1 screens | [Design canvas](https://claude.ai/artifact/6f6zNFTt3oJi4M5i7UsryE) |
 | RUNE | https://github.com/anomalyco/rune (pre-release, pin a `dev` git rev) |
@@ -47,7 +48,7 @@ Phase: **implementation.** Every v1 area has a working first version, and v2 has
 | Missing folder | A folder that isn't there (moved, deleted, or on a drive that isn't connected) shows the design's warning in the grid, naming the drive when it was under `/Volumes`, with "Look again" and "Choose another library folder…". The library folder is looked for every 2 s, so an ejected drive is noticed and a reconnected one comes back by itself. A remembered library folder that is missing at launch opens to the warning, not the first-launch screen |
 | Photo that can't be opened | Develop shows why on the stage (the decoder's own words), with "Try again" and "Show in Finder"; the filmstrip marks it; nothing is open meanwhile, so no edit or rating lands on the photo before. ← → and ratings act on it as on any photo |
 | RAF white balance | A RAF's Temperature reads in kelvin: its as-shot white comes from the camera's multipliers and colour matrix, the slider moves away from it in mired and Tint off the Planckian locus; a kelvin can be typed; "Shot at 4700 K" and an "As shot" button under the sliders; the neutral picker finds a kelvin and tint. A JPEG keeps the relative −100…+100 |
-| RAF + JPEG pairs | A RAF and the JPEG beside it with the same name show as one photo, the RAF, tagged "RAF + JPG" in the grid and counted once in the tree |
+| RAF + JPEG pairs | A RAF and the JPEG beside it with the same name show as one photo, the RAF, tagged "RAF + JPG" in the grid and counted once in the tree. Any raw format pairs the same way, tagged by its extension ("CR3 + JPG"); only RAF pairs have been seen |
 | Folder watching | The root and everything under it are watched (FSEvents). Photos added, removed or replaced, and folders added or removed, show up in the tree, grid and filmstrip within about half a second of the last change (at most 2 s into a long copy). A removed photo leaves the selection; a replaced one gets a new thumbnail. Darkroom's own edit files and temporary files don't count as changes |
 | Film simulation | The info panel shows a Fujifilm photo's simulation, grain effect, color chrome, dynamic range and white balance, read from the camera's MakerNote (JPEG, or a RAF's embedded JPEG). A RAF starts in the camera's look (below); for a JPEG it is shown only |
 | Multi-select | In the grid: ⌘-click adds a photo or takes it out, ⇧-click selects the range from the photo clicked before, ⌘A selects all shown. Ratings, flags, paste and export act on the whole selection; the info panel shows the photo clicked last |
@@ -80,6 +81,13 @@ Design column: ✅ designed on the canvas · ◐ partly · ✗ not designed · n
 - **100% view:** a second full-size pipeline lives on the GPU while a photo is open at 100% (the source plus three `Rgba16Float` textures; roughly 0.7 GB for 26 MP, a guess from the texture sizes, not measured). Slider speed at 100% is unmeasured. Until the full size has decoded, the preview is shown enlarged. The histogram and pickers still read the 2560 px preview. An unedited photo matches its source exactly, and an edited one (Brilliance, Highlights, Shadows, Definition) matches its full-size sRGB export exactly.
 - **Neutral-point picker:** on a JPEG, Temperature and Tint only reach ±0.3 and ±0.25 stops, so a strong cast is clamped at ±100 and only partly removed. It reads a 5×5 mean of the source pixels, ignoring the other adjustments.
 - **RAF white balance is an approximation:** the as-shot white uses the camera's daylight (D65) matrix only, where a DNG converter blends two by temperature; on the six samples it reads 4700–5750 K and leans green (duv +0.001 to +0.017), plausible for their light but not checked against the camera's or another app's numbers. The new balance is applied as per-channel multipliers in linear Rec.2020 after the camera's look is baked in, not in the camera's own space before it. The slider scales (1 mired and 0.0002 duv per unit) are guesses. A RAF edit saved before this with Temperature or Tint set now reads them as kelvin and locus shifts, so its colour changes. The kelvin range ends at 1667 and 25 000 K. The neutral picker's search stops at ±100 on either slider.
+- **Raw files from other brands are in, and none has been opened:** CR3, CR2, NEF, ARW, DNG, RWL, RW2, ORF and PEF are listed, paired with their JPEGs, developed by `rawler` (PPG demosaic for Bayer sensors), cached, thumbnailed from the preview the camera embedded, and fitted to the camera's look against that preview, as a RAF is ([scope](https://claude.ai/artifact/9RosQkMu34Ko9VubKicrJh)). All of it was checked only by unit tests and by the six RAFs still coming out the same (an X-T4 develop byte-identical to before, its thumbnail and info panel). Known gaps before any file is tried:
+  - `rawler` 0.8 has no preview reader for ORF, so an ORF's thumbnail develops the whole raw (seconds) and its look falls back to the base tone fitted on one Fujifilm.
+  - A preview is assumed to be stored as the raw is, before its orientation is applied; the thumbnail turns it by the raw's orientation. Unchecked on any brand.
+  - Shooting details for these formats come from `rawler`'s metadata, not the EXIF block, so the make and model are its cleaned names ("Sony ILCE-7RM5", "Canon EOS R5"), in the info panel and in exports. No maker notes are read: no picture style rows in the info panel.
+  - Black and white is told from the preview having no colour (Oklab chroma over 0.01 in at most 1 pixel in 1000; a guess, tested on generated pixels). That means decoding the preview on every open and export of such a file, untimed. A toned monochrome style (sepia) counts as colour.
+  - Phone DNGs (Apple ProRAW and other linear DNGs) and monochrome sensors (Leica Monochrom) are listed as raws but out of scope; a Monochrom file will show "can't be opened" (`rawler` gives no colour image).
+  - Lens corrections aren't applied; lenses designed around in-camera correction will look distorted or dark in the corners.
 - **RAF + JPEG pairs:** only an exact name match pairs (`DSCF0001.RAF` and `DSCF0001.JPG`). Rating, flag, edits and export all go to the RAF; the JPEG is never shown or edited, and an edit file the JPEG already had is ignored. Removing the RAF from disk brings the JPEG back as a photo of its own.
 - **Designs not followed exactly:** Copy edits, Paste and Reset all use the raised button, not the design's quiet one; the before/after button is the small icon button, the design's is the regular size; the clipping squares sit in an 18 pt press area, larger than the design's 10 pt square. Drawn after they were built, and differing from them: the split view's line has a round grip in the middle, and its tags sit in a dark pill; the 100% view's "Loading the full size…" note is a pill over the photo with a spinner, where the app puts plain text above it; a hidden section's eye is crossed through, with "Hidden" beside it and its title dimmed, where the app only lights the eye; presets are saved from a + in the section header, the photo's look is marked with a tick, the delete confirm says "Keep" or "Delete", and a taken name reads "There's already a preset with that name."; Paste with nothing copied is the faint quiet button; the Library's info panel with several selected says "3 photos selected" over a stack of them, with "Mixed" values, rating and flag for all, and Paste and Copy buttons, where the app shows the photo clicked last; the export dialog's finished state has a tick and names any file that got " (2)", and failures are an Alert, where the app lists them as red lines.
 - **Local tone is tuned on one synthetic scene:** the base's two numbers (`EPSILON` in `base.wgsl`, how big a brightness step counts as an edge; `base_radius`, the window, 1/60 of the long edge) are guesses set by eye on a generated backlit scene. Real photos may want others.
@@ -117,6 +125,7 @@ Everything was built against generated test images and six RAFs downloaded from 
 
 - RAF white balance on the user's own RAFs, against the camera's and another app's kelvin readings; the neutral picker on a real grey card
 - A real external drive or card ejected and reconnected (a 300 MB disk image was used), "Show in Finder" and "Choose another library folder…" (the folder picker can't open headless), and `?` from a real keyboard layout where it needs Shift
+- Any raw file that isn't a RAF: Canon, Nikon, Sony, Leica, Panasonic, OM System, Pentax. Samples per brand from raw.pixls.us are next; the scope's Testing section lists what each must show
 - The RAF starting look on the user's own RAFs, and on any black-and-white, Sepia, Classic Neg., Eterna, DR200 or DR400 shot
 
 - The native folder picker (headless runs can't open it), for the library root and the export destination
@@ -331,6 +340,7 @@ Made:
 - **Full-size export:** the whole image on the GPU, read back in strips.
 - **RAF decoder:** `rawler`, with its Markesteijn demosaic for X-Trans.
 - **RAF starting look:** the camera's settings, as rendered into the embedded JPEG: tone and chroma curves fitted per photo, black and white from the MakerNote.
+- **Other brands' raw files** (the scope's open questions, taken at its recommendations since they weren't answered): open anything `rawler` decodes and list the bodies tried; every brand at once; black and white told from the preview's pixels; lens correction later, as its own item.
 - **Detail reach:** in preview pixels, scaled per render.
 - **Undo model:** per-photo history in memory (`darkroom-core/src/history.rs`), whole edits, nothing in the edit file.
 - **Edited thumbnails:** rendered through the develop pipeline, once per edit, when the photo is left.

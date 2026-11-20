@@ -39,6 +39,10 @@ const CHROMA_QUANTILES: usize = 40;
 /// Chroma is compared over midtones only: in shadows it is mostly noise, and near white the
 /// JPEG has clipped it.
 const MIDTONES: std::ops::Range<f32> = 0.03..0.6;
+/// A camera JPEG counts as black and white when no more than one pixel in a thousand has Oklab
+/// chroma over this. JPEG keeps a grey pixel's colour at exactly neutral, so a monochrome
+/// picture style leaves nothing near it; a toned one (sepia) has far more and counts as colour.
+const MONOCHROME_CHROMA: f32 = 0.01;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CameraLook {
@@ -219,6 +223,12 @@ fn monotone(points: Vec<([f32; 2], f32)>) -> Vec<[f32; 2]> {
     points.iter().zip(ys).map(|(&([x, _], _), y)| [x, y]).collect()
 }
 
+/// Whether a camera's JPEG (linear sRGB pixels) is black and white: how a monochrome picture
+/// style is told apart on cameras whose maker notes Darkroom doesn't read.
+pub fn is_monochrome(jpeg: &[[f32; 3]]) -> bool {
+    !jpeg.is_empty() && jpeg.iter().filter(|&&p| chroma(oklab(p)) > MONOCHROME_CHROMA).count() * 1000 <= jpeg.len()
+}
+
 fn chroma([_, a, b]: [f32; 3]) -> f32 {
     a.hypot(b)
 }
@@ -316,6 +326,17 @@ mod tests {
         assert!((ratio(out) - ratio(red)).abs() < 0.02, "{out:?}");
         let grey = camera().apply([0.2; 3]);
         assert!((grey[0] - grey[1]).abs() < 1e-5 && (grey[1] - grey[2]).abs() < 1e-5, "{grey:?}");
+    }
+
+    #[test]
+    fn a_grey_jpeg_is_monochrome_and_a_toned_or_coloured_one_is_not() {
+        let raw = pixels(20_000);
+        let grey: Vec<[f32; 3]> = raw.iter().map(|&p| [luminance(p); 3]).collect();
+        assert!(is_monochrome(&grey));
+        let sepia: Vec<[f32; 3]> = grey.iter().map(|&[y, _, _]| [y * 1.1, y, y * 0.8]).collect();
+        assert!(!is_monochrome(&sepia));
+        assert!(!is_monochrome(&raw));
+        assert!(!is_monochrome(&[]));
     }
 
     #[test]
