@@ -9,6 +9,8 @@ use darkroom_core::white::AsShot;
 use darkroom_render::Source;
 use image::{DynamicImage, ImageDecoder, ImageReader, imageops::FilterType};
 
+use crate::previews::{self, Preview};
+
 /// The longest edge of the preview the develop pass runs on. Full resolution is for 100% zoom
 /// and export.
 pub const PREVIEW_EDGE: u32 = 2560;
@@ -27,6 +29,8 @@ pub struct Photo {
     pub histogram: [[u32; 256]; 4],
     /// The white a raw file was shot at, so its Temperature and Tint read in kelvin.
     pub as_shot: Option<AsShot>,
+    /// A raw file shot in a monochrome simulation: black and white until the edit says otherwise.
+    pub camera_black_and_white: bool,
 }
 
 /// A photo's pixels, RGBA and tightly packed.
@@ -104,17 +108,34 @@ fn next_id() -> u64 {
 }
 
 impl Photo {
-    /// Decodes a photo and scales it to preview size.
+    /// Decodes a photo and scales it to preview size. A RAF's preview comes from the cache when
+    /// it was developed before.
     pub fn open(path: &str) -> Result<Photo, String> {
-        let mut img = decode(Path::new(path))?;
-        let full_size = [img.width(), img.height()];
-        if img.width().max(img.height()) > PREVIEW_EDGE {
-            img = img.resize(PREVIEW_EDGE, PREVIEW_EDGE, FilterType::Triangle);
-        }
-        let name = Path::new(path).file_name().map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned());
-        let (size, pixels) = Pixels::from_image(img);
-        let as_shot = if raf::is_raf(Path::new(path)) { crate::raw::as_shot(Path::new(path)) } else { None };
-        Ok(Photo { id: next_id(), name, size, full_size, exif: Exif::read(Path::new(path)), histogram: pixels.histogram(), pixels, as_shot })
+        let file = Path::new(path);
+        let cached = if raf::is_raf(file) { previews::path(file) } else { None };
+        let (full_size, size, pixels) = match cached.as_deref().and_then(previews::read) {
+            Some(p) => (p.full_size, p.size, Pixels::LinearHalf(p.rgba)),
+            None => {
+                let mut img = decode(file)?;
+                let full_size = [img.width(), img.height()];
+                if img.width().max(img.height()) > PREVIEW_EDGE {
+                    img = img.resize(PREVIEW_EDGE, PREVIEW_EDGE, FilterType::Triangle);
+                }
+                let (size, pixels) = Pixels::from_image(img);
+                match (cached, pixels) {
+                    (Some(c), Pixels::LinearHalf(rgba)) => {
+                        let preview = Preview { full_size, size, rgba };
+                        previews::write(&c, &preview);
+                        (full_size, size, Pixels::LinearHalf(preview.rgba))
+                    }
+                    (_, pixels) => (full_size, size, pixels),
+                }
+            }
+        };
+        let name = file.file_name().map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned());
+        let as_shot = if raf::is_raf(file) { crate::raw::as_shot(file) } else { None };
+        let camera_black_and_white = crate::raw::shot_black_and_white(file);
+        Ok(Photo { id: next_id(), name, size, full_size, exif: Exif::read(file), histogram: pixels.histogram(), pixels, as_shot, camera_black_and_white })
     }
 
     /// The photo as decoded around `pixel`, in linear light (sRGB primaries): the mean of the
@@ -159,7 +180,7 @@ impl Photo {
                 rgba.extend_from_slice(&[(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8, 255]);
             }
         }
-        Photo { id: next_id(), name: "Test chart".into(), size: [w, h], full_size: [w, h], exif: Exif::default(), as_shot: None, histogram: histogram(&rgba), pixels: Pixels::Srgb8(rgba) }
+        Photo { id: next_id(), name: "Test chart".into(), size: [w, h], full_size: [w, h], exif: Exif::default(), as_shot: None, camera_black_and_white: false, histogram: histogram(&rgba), pixels: Pixels::Srgb8(rgba) }
     }
 }
 

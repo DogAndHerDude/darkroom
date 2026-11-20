@@ -72,3 +72,24 @@ pub const DANGER_SOFT: Color = Color { r: 0.049707, g: 0.012983, b: 0.010960, a:
 pub const WARNING: Color = Color { r: 0.871367, g: 0.564712, b: 0.076185, a: 1.0 };
 /// `warning-soft` #3a3017
 pub const WARNING_SOFT: Color = Color { r: 0.042311, g: 0.029557, b: 0.008568, a: 1.0 };
+
+// Selective Color's band swatches: each band's centre hue at Oklab lightness 0.72, as much chroma
+// as sRGB holds up to 0.15. Not in the design system yet.
+/// Red band #f47c6c
+pub const BAND_RED: Color = Color { r: 0.904077, g: 0.201884, b: 0.151046, a: 1.0 };
+/// Orange band #e78b30
+pub const BAND_ORANGE: Color = Color { r: 0.802432, g: 0.257581, b: 0.030033, a: 1.0 };
+/// Yellow band #b3a90f
+pub const BAND_YELLOW: Color = Color { r: 0.451920, g: 0.395190, b: 0.004851, a: 1.0 };
+/// Green band #69bc61
+pub const BAND_GREEN: Color = Color { r: 0.141275, g: 0.500766, b: 0.118886, a: 1.0 };
+/// Aqua band #16bbbc
+pub const BAND_AQUA: Color = Color { r: 0.008132, g: 0.499824, b: 0.501391, a: 1.0 };
+/// Blue band #69a5fe
+pub const BAND_BLUE: Color = Color { r: 0.140518, g: 0.376530, b: 0.991900, a: 1.0 };
+/// Purple band #ab90f9
+pub const BAND_PURPLE: Color = Color { r: 0.404853, g: 0.278754, b: 0.943358, a: 1.0 };
+/// Magenta band #d680d4
+pub const BAND_MAGENTA: Color = Color { r: 0.673623, g: 0.216192, b: 0.656475, a: 1.0 };
+/// The swatches in band order.
+pub const BANDS: [Color; 8] = [BAND_RED, BAND_ORANGE, BAND_YELLOW, BAND_GREEN, BAND_AQUA, BAND_BLUE, BAND_PURPLE, BAND_MAGENTA];

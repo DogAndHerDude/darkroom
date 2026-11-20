@@ -68,6 +68,8 @@ pub struct Prepared {
     pub detail_scale: f32,
     /// A raw file's white as shot, which its Temperature and Tint move from.
     pub as_shot: Option<AsShot>,
+    /// Shot in a monochrome simulation, so black and white until the edit says otherwise.
+    pub camera_black_and_white: bool,
 }
 
 /// Where an edited photo's thumbnail is cached, and the edit it will show.
@@ -310,7 +312,8 @@ fn prepare(path: &Path, long_edge: Option<u32>) -> Result<Prepared, String> {
     let (size, pixels) = Pixels::from_image(img);
     let detail_scale = detail_scale(full, size);
     let as_shot = if raf::is_raf(path) { crate::raw::as_shot(path) } else { None };
-    Ok(Prepared { path: path.to_owned(), size, pixels, edit, detail_scale, as_shot })
+    let camera_black_and_white = crate::raw::shot_black_and_white(path);
+    Ok(Prepared { path: path.to_owned(), size, pixels, edit, detail_scale, as_shot, camera_black_and_white })
 }
 
 /// How many pixels of a render at `size` cover one pixel of the preview of a photo `full` in
@@ -384,19 +387,30 @@ fn thumb_worker(receive: &Mutex<Receiver<ThumbJob>>, inbox: &Mutex<Vec<Msg>>, wa
     }
 }
 
-fn cache_dir() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(std::env::temp_dir, |h| PathBuf::from(h).join("Library/Caches")).join("darkroom/thumbs")
+/// Darkroom's folder of caches: thumbnails and developed RAF previews.
+pub fn caches() -> PathBuf {
+    std::env::var_os("HOME").map_or_else(std::env::temp_dir, |h| PathBuf::from(h).join("Library/Caches")).join("darkroom")
 }
 
-/// The cached thumbnail's file: changes when the photo's path, size or modification time do.
-fn cache_path(path: &Path) -> Option<PathBuf> {
+fn cache_dir() -> PathBuf {
+    caches().join("thumbs")
+}
+
+/// A hash of the photo's path, size and modification time, so anything cached from it is
+/// dropped when the file changes. None when the file can't be read.
+pub fn file_hash(path: &Path) -> Option<blake3::Hasher> {
     let meta = std::fs::metadata(path).ok()?;
     let modified = meta.modified().ok()?.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_nanos();
     let mut hash = blake3::Hasher::new();
     hash.update(path.as_os_str().as_encoded_bytes());
     hash.update(&meta.len().to_le_bytes());
     hash.update(&modified.to_le_bytes());
-    Some(cache_dir().join(format!("{}.jpg", &hash.finalize().to_hex()[..32])))
+    Some(hash)
+}
+
+/// The cached thumbnail's file: changes when the photo's path, size or modification time do.
+fn cache_path(path: &Path) -> Option<PathBuf> {
+    Some(cache_dir().join(format!("{}.jpg", &file_hash(path)?.finalize().to_hex()[..32])))
 }
 
 /// What a thumbnail job ends in.

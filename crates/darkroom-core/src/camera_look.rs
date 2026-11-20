@@ -61,8 +61,9 @@ fn quantile(sorted: &[f32], q: f32) -> f32 {
 impl CameraLook {
     /// Fits the look from `raw` (developed sensor data) and `jpeg` (the camera's JPEG) of the
     /// same scene, both linear light in sRGB primaries. They needn't line up or be the same
-    /// size. `black_and_white` takes all the colour out, as the camera's monochrome
-    /// simulations do. None when too little can be compared to trust a curve.
+    /// size. `black_and_white` says the JPEG is in one of the camera's monochrome simulations:
+    /// it has no colour to compare, so colour is left as the raw has it, for the Black & White
+    /// mixer to work on. None when too little can be compared to trust a curve.
     pub fn fit(raw: &[[f32; 3]], jpeg: &[[f32; 3]], black_and_white: bool) -> Option<CameraLook> {
         let sorted = |pixels: &[[f32; 3]]| {
             let mut y: Vec<f32> = pixels.iter().map(|&p| luminance(p)).collect();
@@ -96,7 +97,7 @@ impl CameraLook {
             return None;
         }
         let mut look = CameraLook { tone: monotone(points), chroma: vec![[0.0, 0.0], [1.0, 1.0]] };
-        look.chroma = if black_and_white { vec![[0.0, 0.0], [1.0, 0.0]] } else { look.fit_chroma(raw, jpeg) };
+        look.chroma = if black_and_white { vec![[0.0, 0.0], [1.0, 1.0]] } else { look.fit_chroma(raw, jpeg) };
         Some(look)
     }
 
@@ -223,7 +224,7 @@ fn chroma([_, a, b]: [f32; 3]) -> f32 {
 }
 
 /// Linear sRGB to Oklab (Björn Ottosson's matrices).
-fn oklab([r, g, b]: [f32; 3]) -> [f32; 3] {
+pub(crate) fn oklab([r, g, b]: [f32; 3]) -> [f32; 3] {
     let l = (0.412_221_47 * r + 0.536_332_55 * g + 0.051_445_995 * b).cbrt();
     let m = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
     let s = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
@@ -305,11 +306,14 @@ mod tests {
     }
 
     #[test]
-    fn black_and_white_takes_all_the_colour_and_keeps_grey_grey() {
+    fn a_black_and_white_jpeg_leaves_the_colour_as_the_raw_has_it() {
         let raw = pixels(60_000);
-        let look = CameraLook::fit(&raw, &render(&camera(), &raw), true).unwrap();
-        let [r, g, b] = look.apply([0.3, 0.1, 0.05]);
-        assert!((r - g).abs() < 1e-3 && (g - b).abs() < 1e-3, "{r} {g} {b}");
+        let grey: Vec<[f32; 3]> = render(&camera(), &raw).iter().map(|&p| [luminance(p); 3]).collect();
+        let look = CameraLook::fit(&raw, &grey, true).unwrap();
+        let red = [0.3, 0.1, 0.05];
+        let out = look.apply(red);
+        let ratio = |c: [f32; 3]| chroma(oklab(c)) / oklab(c)[0];
+        assert!((ratio(out) - ratio(red)).abs() < 0.02, "{out:?}");
         let grey = camera().apply([0.2; 3]);
         assert!((grey[0] - grey[1]).abs() < 1e-5 && (grey[1] - grey[2]).abs() < 1e-5, "{grey:?}");
     }

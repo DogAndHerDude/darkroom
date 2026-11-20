@@ -193,6 +193,9 @@ pub struct Develop {
     pub histogram_enabled: bool,
     /// The white a raw photo was shot at; its Temperature and Tint are then a real white balance.
     pub as_shot: Option<AsShot>,
+    /// The photo was shot in a monochrome simulation, so it shows in black and white until the
+    /// edit says otherwise.
+    pub camera_black_and_white: bool,
 }
 
 impl Develop {
@@ -361,6 +364,7 @@ impl Develop {
             detail_scale: 1.0,
             histogram_enabled: true,
             as_shot: None,
+            camera_black_and_white: false,
         }
     }
 
@@ -611,7 +615,7 @@ impl Develop {
             queue.write_buffer(&self.curves, 0, bytemuck::cast_slice(&lut));
             self.uploaded_curves = Some(edit.curves.clone());
         }
-        let mut params = Params::from_edit_shot(edit, self.as_shot);
+        let mut params = Params::from_edit_shot(edit, self.as_shot, self.camera_black_and_white);
         if let Some([x, y]) = probe {
             params.effects[2] = x as f32;
             params.effects[3] = y as f32;

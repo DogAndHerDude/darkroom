@@ -64,6 +64,20 @@ pub fn icon_toggle(key: impl Into<String>, label: impl Into<String>, icon: fn(Co
         .child(canvas(icon(if on { t::ACCENT_INK } else { t::INK_MUTED })).size(16.0, 16.0))
 }
 
+/// An on/off switch: a pill, lit with the knob to the right when on. Not in the design system
+/// yet.
+pub fn switch(key: impl Into<String>, label: impl Into<String>, on: bool, press: impl Fn(&mut State) + 'static) -> El {
+    el().key(key.into())
+        .role("switch")
+        .label(label.into())
+        .checked(on)
+        .size(28.0, 16.0)
+        .radius(8.0)
+        .fill(if on { t::ACCENT } else { t::BG_ACTIVE })
+        .on_press(press)
+        .child(el().absolute(if on { 14.0 } else { 2.0 }, 2.0).size(12.0, 12.0).radius(6.0).fill(if on { t::ON_ACCENT } else { t::INK_MUTED }))
+}
+
 /// The design's eye in a 20 × 20 box: hides a section's edits.
 pub fn eye_icon(color: Color) -> Shape {
     let lids = Path::new()

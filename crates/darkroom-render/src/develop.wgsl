@@ -2,7 +2,8 @@
 // stage texture (linear Rec.2020, unbounded) the detail passes read.
 //
 //   source (sRGB) → linear Rec.2020 working space
-//   1 white balance → 2 exposure → 3 light (black point, then tone) → 4 color → 5 curves
+//   1 white balance → 2 exposure → 3 light (black point, then tone) → 4 color (saturation and
+//   vibrance, Selective Color, black and white) → 5 curves
 //
 // Before it, when Brilliance, Highlights or Shadows are set: the edge-aware base of the photo's
 // luminance (base.wgsl), which makes those three act on regions. After it: noise reduction
@@ -102,8 +103,75 @@ fn light(c: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
 
 // ---- 4 color --------------------------------------------------------------------------------
 
+const PI: f32 = 3.14159265;
+const TAU: f32 = 6.28318531;
+// Oklab chroma at which a colour feels the bands fully; below it they fade out towards grey.
+// Must match `bands::GREY_CHROMA` (a test in params.rs checks).
+const GREY_CHROMA: f32 = 0.04;
+
+fn band(v: array<vec4<f32>, 2>, i: u32) -> f32 {
+    return v[i >> 2u][i & 3u];
+}
+
+// The two bands either side of hue `h` (radians) and the weight of the second, as bands::pair:
+// a raised cosine from one centre to the next, so the weights are smooth and sum to 1.
+fn band_pair(h: f32) -> vec3<f32> {
+    let hue = h - TAU * floor(h / TAU);
+    for (var i = 0u; i < 8u; i++) {
+        let j = (i + 1u) % 8u;
+        let c = band(p.band_centres, i);
+        var gap = band(p.band_centres, j) - c;
+        gap -= TAU * floor(gap / TAU);
+        var along = hue - c;
+        along -= TAU * floor(along / TAU);
+        if along < gap {
+            return vec3<f32>(f32(i), f32(j), 0.5 - 0.5 * cos(PI * along / gap));
+        }
+    }
+    return vec3<f32>(0.0, 1.0, 0.0);
+}
+
+// One per-band setting at a hue, from the two bands either side of it.
+fn banded(v: array<vec4<f32>, 2>, pair: vec3<f32>) -> f32 {
+    return mix(band(v, u32(pair.x)), band(v, u32(pair.y)), pair.z);
+}
+
+// How much a colour of chroma `c` feels the bands: none at grey, so noise in a grey wall
+// doesn't pick up colour.
+fn presence(c: f32) -> f32 {
+    return smoothstep(0.0, GREY_CHROMA, c);
+}
+
+// Selective Color: each band's hue turned, chroma scaled and lightness moved, at constant
+// everything else.
+fn selective(lab: vec3<f32>) -> vec3<f32> {
+    let chroma = length(lab.yz);
+    let k = presence(chroma);
+    if k == 0.0 {
+        return lab;
+    }
+    let h = atan2(lab.z, lab.y);
+    let pair = band_pair(h);
+    let turned = h + banded(p.band_hue, pair) * k;
+    let c = chroma * max(1.0 + banded(p.band_saturation, pair) * k, 0.0);
+    let l = lab.x * exp2(banded(p.band_luminance, pair) * k);
+    return vec3<f32>(l, c * cos(turned), c * sin(turned));
+}
+
+// Black and white: the colour's own lightness, moved by its bands' mixer settings, with no
+// chroma. Grey is left at its lightness whatever the mixer says.
+fn monochrome(lab: vec3<f32>) -> vec3<f32> {
+    let chroma = length(lab.yz);
+    var l = lab.x;
+    let k = presence(chroma);
+    if k > 0.0 {
+        l *= exp2(banded(p.band_mix, band_pair(atan2(lab.z, lab.y))) * k);
+    }
+    return vec3<f32>(l, 0.0, 0.0);
+}
+
 fn color(c: vec3<f32>) -> vec3<f32> {
-    if p.color.x == 0.0 && p.color.y == 0.0 {
+    if all(p.color == vec4<f32>(0.0)) {
         return c;
     }
     var lab = srgb_to_oklab(rec2020_to_srgb(c));
@@ -111,6 +179,13 @@ fn color(c: vec3<f32>) -> vec3<f32> {
     // Vibrance: chroma raised (or lowered) mostly in muted colours, barely in vivid ones.
     let vib = p.color.y * (1.0 - clamp(chroma / 0.25, 0.0, 1.0));
     lab = vec3<f32>(lab.x, lab.yz * max(1.0 + vib, 0.0) * (1.0 + p.color.x));
+    if p.color.z > 0.5 { lab = selective(lab); }
+    if p.color.w > 0.5 {
+        // Grey of Oklab lightness L is L³ in every channel of any RGB with a D65 white; written
+        // straight out, so the channels are equal exactly, not to within the matrices' rounding.
+        let l = monochrome(lab).x;
+        return vec3<f32>(l * l * l);
+    }
     return srgb_to_2020(oklab_to_srgb(lab));
 }
 

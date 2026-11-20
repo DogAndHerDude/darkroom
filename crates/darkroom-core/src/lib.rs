@@ -4,6 +4,7 @@
 //! the crop, the rating and the flag. It lives in a [`sidecar`] file next to the photo; the
 //! original is never written.
 
+pub mod bands;
 pub mod camera_look;
 pub mod curve;
 pub mod edit;
@@ -19,4 +20,4 @@ pub mod white;
 
 pub use curve::Curve;
 pub use history::History;
-pub use edit::{Channel, Color, Curves, Detail, Edit, Flag, Geometry, Light, Picker};
+pub use edit::{Band, BlackAndWhite, Channel, Color, Curves, Detail, Edit, Flag, Geometry, Hsl, Light, Picker};

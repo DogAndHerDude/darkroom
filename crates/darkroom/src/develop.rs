@@ -4,13 +4,13 @@
 use std::path::{Path, PathBuf};
 
 use darkroom_core::white::AsShot;
-use darkroom_core::{Edit, History, geometry, sidecar};
+use darkroom_core::{Edit, History, bands, geometry, sidecar};
 use darkroom_render::{fit_aspect, neutral_point, srgb_to_rec2020};
 use rune::{Cursor, Drag, El, Key, KeyEvent, Phase, PointerEvent, ScrollSpec, SurfaceFit, TextEdit, Tx, WheelEvent, canvas, col, effect, el, row, spacer, text, text_input};
 
 use crate::curves::Picker;
 use crate::theme as t;
-use crate::ui::{alert_icon, before_after_icon, button, divider, eye_icon, eyedropper_icon, icon_button, icon_toggle, redo_icon, rule, segmented, stars, top_bar, undo_icon, warning_icon};
+use crate::ui::{alert_icon, before_after_icon, button, divider, eye_icon, eyedropper_icon, icon_button, icon_toggle, redo_icon, rule, segmented, stars, switch, top_bar, undo_icon, warning_icon};
 use crate::library::{Note, first_line};
 use crate::{Module, PHOTO_SLOT, State, crop, curves, presets};
 
@@ -35,6 +35,8 @@ pub enum Pick {
     Point(Picker),
     /// The white balance that makes the clicked pixel neutral.
     Neutral,
+    /// The Selective Color band of the clicked pixel's colour.
+    Band,
 }
 
 impl Pick {
@@ -43,6 +45,7 @@ impl Pick {
         match self {
             Pick::Point(p) => curves::target(p),
             Pick::Neutral => "neutral grey",
+            Pick::Band => "a colour to adjust",
         }
     }
 
@@ -53,6 +56,7 @@ impl Pick {
             Pick::Point(Picker::Grey) => "Grey point",
             Pick::Point(Picker::White) => "White point",
             Pick::Neutral => "Neutral point",
+            Pick::Band => "Colour band",
         }
     }
 }
@@ -109,7 +113,75 @@ const DETAIL: [Adjustment; 4] = [
     Adjustment { min: 0.0, ..adj("vignette", "Vignette", |e| e.detail.vignette, |e, v| e.detail.vignette = v) },
 ];
 
+fn band_hue<const B: usize>(e: &Edit) -> f32 {
+    e.hsl.bands()[B].hue
+}
+fn set_band_hue<const B: usize>(e: &mut Edit, v: f32) {
+    e.hsl.band_mut(B).hue = v;
+}
+fn band_saturation<const B: usize>(e: &Edit) -> f32 {
+    e.hsl.bands()[B].saturation
+}
+fn set_band_saturation<const B: usize>(e: &mut Edit, v: f32) {
+    e.hsl.band_mut(B).saturation = v;
+}
+fn band_luminance<const B: usize>(e: &Edit) -> f32 {
+    e.hsl.bands()[B].luminance
+}
+fn set_band_luminance<const B: usize>(e: &mut Edit, v: f32) {
+    e.hsl.band_mut(B).luminance = v;
+}
+
+/// One band's Selective Color sliders. Only the chosen band's show, so they share keys.
+const fn band_sliders<const B: usize>() -> [Adjustment; 3] {
+    [
+        adj("band-hue", "Hue", band_hue::<B>, set_band_hue::<B>),
+        adj("band-saturation", "Saturation", band_saturation::<B>, set_band_saturation::<B>),
+        adj("band-luminance", "Luminance", band_luminance::<B>, set_band_luminance::<B>),
+    ]
+}
+
+const SELECTIVE: [[Adjustment; 3]; 8] =
+    [band_sliders::<0>(), band_sliders::<1>(), band_sliders::<2>(), band_sliders::<3>(), band_sliders::<4>(), band_sliders::<5>(), band_sliders::<6>(), band_sliders::<7>()];
+
+fn mix<const B: usize>(e: &Edit) -> f32 {
+    e.black_and_white.mix()[B]
+}
+fn set_mix<const B: usize>(e: &mut Edit, v: f32) {
+    *e.black_and_white.mix_mut(B) = v;
+}
+
+const fn mix_slider<const B: usize>(key: &'static str) -> Adjustment {
+    adj(key, bands::NAMES[B], mix::<B>, set_mix::<B>)
+}
+
+const MIX: [Adjustment; 8] = [
+    mix_slider::<0>("mix-red"),
+    mix_slider::<1>("mix-orange"),
+    mix_slider::<2>("mix-yellow"),
+    mix_slider::<3>("mix-green"),
+    mix_slider::<4>("mix-aqua"),
+    mix_slider::<5>("mix-blue"),
+    mix_slider::<6>("mix-purple"),
+    mix_slider::<7>("mix-magenta"),
+];
+
+/// The coloured filters of black-and-white film as mixer settings, in band order: each lightens
+/// its own colour and darkens its opposite. Guesses at a filter's effect on sky, foliage and
+/// skin, not measured against film.
+const FILTERS: [(&str, [f32; 8]); 4] = [
+    ("Yellow", [10.0, 15.0, 20.0, 0.0, 0.0, -25.0, -10.0, 0.0]),
+    ("Orange", [25.0, 30.0, 15.0, 0.0, -15.0, -45.0, -20.0, 0.0]),
+    ("Red", [45.0, 35.0, 10.0, -20.0, -35.0, -65.0, -30.0, 0.0]),
+    ("Green", [-20.0, -10.0, 15.0, 35.0, 10.0, -15.0, 0.0, -20.0]),
+];
+
 impl State {
+    /// Whether the photo shows in black and white.
+    pub fn black_and_white(&self) -> bool {
+        self.edit.black_and_white.is_on(self.photo.camera_black_and_white)
+    }
+
     /// Whether the photo shows at 100%. The crop tool always shows the whole photo.
     pub fn zoomed(&self) -> bool {
         self.zoom == Zoom::Full && !self.cropping
@@ -399,6 +471,8 @@ pub fn view(s: &State, inset: f32) -> El {
         sections
             .child(section("light", "Light", e.light.enabled, |e| e.light.enabled = !e.light.enabled, None, sliders(&LIGHT, s)))
             .child(section("color", "Color", e.color.enabled, |e| e.color.enabled = !e.color.enabled, Some(neutral_picker(s)), color_sliders(s)))
+            .child(section("hsl", "Selective Color", e.hsl.enabled, |e| e.hsl.enabled = !e.hsl.enabled, Some(band_picker(s)), selective(s)))
+            .child(black_and_white(s))
             .child(section("curves", "Curves", e.curves.enabled, |e| e.curves.enabled = !e.curves.enabled, None, curves::body(s)))
             .child(section("detail", "Detail", e.detail.enabled, |e| e.detail.enabled = !e.detail.enabled, None, sliders(&DETAIL, s)))
             .child(presets::section(s))
@@ -572,6 +646,10 @@ fn pick(s: &mut State, p: [f32; 2]) {
             }
             None => s.status = "That spot can't be made neutral".into(),
         },
+        Pick::Band => match bands::band_of(s.photo.linear_at(pixel)) {
+            Some(band) => s.band = band,
+            None => s.status = "That spot is too near grey to have a colour band".into(),
+        },
     }
 }
 
@@ -655,24 +733,83 @@ fn neutral_picker(s: &State) -> El {
 /// (lit while they are hidden), then its controls.
 fn section(key: &'static str, title: &'static str, enabled: bool, toggle: fn(&mut Edit), tools: Option<El>, content: El) -> El {
     let label = if enabled { format!("Hide {title} edits") } else { format!("Show {title} edits") };
-    let head = row()
-        .w_full()
-        .h(36.0)
-        .px(12.0)
-        .gap(4.0)
-        .center_y()
-        .child(text(title).font(t::HEADING).color(t::INK))
-        .child(spacer())
-        .children(tools)
-        .child(icon_toggle(format!("{key}-toggle"), label, eye_icon, !enabled, move |s| {
-            toggle(&mut s.edit);
-            s.save();
-        }));
+    let eye = icon_toggle(format!("{key}-toggle"), label, eye_icon, !enabled, move |s| {
+        toggle(&mut s.edit);
+        s.save();
+    });
+    section_with(key, title, tools.into_iter().chain([eye]).collect(), !enabled, content)
+}
+
+/// A panel section with any tools in its heading; `dimmed` fades its controls.
+fn section_with(key: &'static str, title: &'static str, tools: Vec<El>, dimmed: bool, content: El) -> El {
+    let head = row().w_full().h(36.0).px(12.0).gap(4.0).center_y().child(text(title).font(t::HEADING).color(t::INK)).child(spacer()).children(tools);
     let mut body = col().w_full().px(12.0).pb(16.0).child(content);
-    if !enabled {
+    if dimmed {
         body = body.dim(0.45);
     }
     col().key(key).w_full().child(head).child(body).child(rule())
+}
+
+/// Selective Color's eyedropper: the next click on the photo chooses the band of its colour.
+fn band_picker(s: &State) -> El {
+    icon_toggle("band-picker", "Pick a colour band from the photo", eyedropper_icon, s.picker == Some(Pick::Band), |s| s.toggle_picker(Pick::Band))
+}
+
+/// Selective Color: a swatch per band, then the chosen band's three sliders. Off while the
+/// photo is in black and white, where the mixer does its job.
+fn selective(s: &State) -> El {
+    let swatches = (0..bands::COUNT).fold(row().w_full().gap(4.0), |r, i| {
+        let chosen = s.band == i;
+        let moved = s.edit.hsl.bands()[i] != darkroom_core::Band::default();
+        let mut swatch = el()
+            .key(format!("band-{}", bands::NAMES[i].to_lowercase()))
+            .role("radio")
+            .label(bands::NAMES[i])
+            .checked(chosen)
+            .size(30.0, 30.0)
+            .center()
+            .radius(15.0)
+            .hover(t::BG_HOVER)
+            .on_press(move |s: &mut State| s.band = i)
+            .child(el().size(18.0, 18.0).radius(9.0).fill(t::BANDS[i]));
+        if chosen {
+            swatch = swatch.border(1.5, t::INK);
+        }
+        // A moved band is marked with a dot under its swatch.
+        let dot = el().size(4.0, 4.0).radius(2.0).fill(if moved { t::ACCENT } else { t::BG_PANEL });
+        r.child(col().gap(2.0).center().child(swatch).child(dot))
+    });
+    let body = col()
+        .w_full()
+        .gap(12.0)
+        .child(swatches)
+        .child(text(bands::NAMES[s.band]).key("band-name").font(t::LABEL).color(t::INK_MUTED))
+        .child(sliders(&SELECTIVE[s.band], s));
+    if !s.black_and_white() {
+        return body;
+    }
+    col().w_full().gap(8.0).child(text("Off while the photo is black and white").font(t::CAPTION).color(t::INK_MUTED)).child(body.dim(0.45))
+}
+
+/// Black & White: a switch in the heading in place of the eye, the mixer, and the classic
+/// filters as buttons that set it.
+fn black_and_white(s: &State) -> El {
+    let on = s.black_and_white();
+    let toggle = switch("bw-switch", "Black and white", on, |s: &mut State| {
+        let camera = s.photo.camera_black_and_white;
+        // Back to what the camera shot is no edit at all.
+        let next = !s.black_and_white();
+        s.edit.black_and_white.on = (next != camera).then_some(next);
+        s.save();
+    });
+    let filters = FILTERS.iter().fold(row().w_full().gap(6.0), |r, &(name, mix)| {
+        r.child(button(format!("filter-{}", name.to_lowercase()), name, move |s: &mut State| {
+            s.edit.black_and_white.set_mix(mix);
+            s.save();
+        }))
+    });
+    let content = col().w_full().gap(12.0).child(sliders(&MIX, s)).child(text("Filters").font(t::CAPTION).color(t::INK_MUTED)).child(filters);
+    section_with("black-and-white", "Black & White", vec![toggle], !on, content)
 }
 
 fn sliders(adjustments: &[Adjustment], s: &State) -> El {

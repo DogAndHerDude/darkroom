@@ -103,6 +103,12 @@ pub fn as_shot(path: &Path) -> Option<AsShot> {
     std::panic::catch_unwind(read).ok().flatten()
 }
 
+/// Whether a RAF was shot in a monochrome simulation, so it opens in black and white. The colour
+/// is kept at decode, for the mixer; a JPEG has none left, so it never counts.
+pub fn shot_black_and_white(path: &Path) -> bool {
+    raf::is_raf(path) && Exif::read(path).look.is_some_and(|l| l.is_black_and_white())
+}
+
 /// `x` with `m · x = b`, by Cramer's rule; None when `m` is singular.
 fn solve(m: [[f32; 3]; 3], b: [f32; 3]) -> Option<[f32; 3]> {
     let det = |m: [[f32; 3]; 3]| m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);

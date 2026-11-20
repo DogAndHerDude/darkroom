@@ -82,5 +82,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     c = vignette(c, uv, f32(size.x) / f32(size.y));
-    textureStore(working, at, vec4<f32>(output(c, p.output.x > 0.5), 1.0));
+    var out = output(c, p.output.x > 0.5);
+    // A black-and-white photo's greys are the same in every space with a D65 white; through the
+    // matrix, whose rows sum to 1 only to within f32 rounding, its channels could differ by a
+    // level. Only then: an unedited colour photo relies on the matrices' round trip cancelling.
+    if p.color.w > 0.5 && c.r == c.g && c.g == c.b {
+        out = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    textureStore(working, at, vec4<f32>(out, 1.0));
 }

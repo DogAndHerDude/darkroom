@@ -55,6 +55,7 @@ Priorities, in the user's words: RGB curves, and the Apple Photos-style basics (
 | --- | --- |
 | Feature notes, status, known gaps | `README.md` (read this next) |
 | v1 feature spec | https://claude.ai/artifact/BNANWQoV2ctnippxEAnmz3 |
+| v2 spec: HSL and black & white | https://claude.ai/artifact/M9ZwpG5JHmXRs4cvaYT77L |
 | Design system "Darkroom" (`tokens.json` is the source of truth) | https://claude.ai/artifact/2AketXsxSQns3vJyx2HrM3 |
 | v1 screens | https://claude.ai/artifact/6f6zNFTt3oJi4M5i7UsryE |
 
@@ -86,6 +87,7 @@ Where things live in the app crate:
 | `export.rs` | Export settings, dialog, and file writing |
 | `jobs.rs` | Background threads, the thumbnail cache (edited thumbnails are developed in the compositor), and the watch on the root folder |
 | `photo.rs`, `raw.rs` | Decoding a photo into `Pixels` (8-bit sRGB or linear half float) |
+| `previews.rs` | The disk cache of each RAF's developed preview; bump its `FORMAT` when RAF developing changes |
 | `ui.rs`, `theme.rs` | Shared controls; colour and type tokens |
 
 ### Build
@@ -159,7 +161,7 @@ export DARKROOM_NO_PREFS=1 HOME=/path/to/scratch/home
 ./target/debug/darkroom path/to/folder --snap out.png --script events.json
 ```
 
-- Scenes: `develop, edited, curves, curve-luma, curve-red, extreme, definition, sharpen, denoise, warm, crop, cropped, hidden, original, split, clipping, zoom, picking, presets`. Add a scene when you add a state worth looking at.
+- Scenes: `develop, edited, curves, curve-luma, curve-red, extreme, selective, mono, definition, sharpen, denoise, warm, crop, cropped, hidden, original, split, clipping, zoom, picking, presets`. Add a scene when you add a state worth looking at.
 - The right-hand panel scrolls; use `--size 1280x1500` to see the lower sections.
 - `DARKROOM_DEBUG=1` prints each GPU readback, and the as-shot white of each RAF opened.
 

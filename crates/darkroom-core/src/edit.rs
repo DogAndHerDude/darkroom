@@ -19,6 +19,8 @@ pub struct Edit {
     pub flag: Flag,
     pub light: Light,
     pub color: Color,
+    pub hsl: Hsl,
+    pub black_and_white: BlackAndWhite,
     pub curves: Curves,
     pub detail: Detail,
     pub geometry: Geometry,
@@ -32,6 +34,8 @@ impl Default for Edit {
             flag: Flag::None,
             light: Light::default(),
             color: Color::default(),
+            hsl: Hsl::default(),
+            black_and_white: BlackAndWhite::default(),
             curves: Curves::default(),
             detail: Detail::default(),
             geometry: Geometry::default(),
@@ -43,7 +47,7 @@ impl Edit {
     /// Whether anything changes the photo's pixels (rating and flag don't).
     pub fn has_adjustments(&self) -> bool {
         let neutral = Edit::default();
-        self.light != neutral.light || self.color != neutral.color || self.curves != neutral.curves || self.detail != neutral.detail || self.geometry != neutral.geometry
+        self.light != neutral.light || self.color != neutral.color || self.hsl != neutral.hsl || self.black_and_white != neutral.black_and_white || self.curves != neutral.curves || self.detail != neutral.detail || self.geometry != neutral.geometry
     }
 
     /// The same edit with every adjustment reset, keeping rating and flag.
@@ -51,10 +55,12 @@ impl Edit {
         Edit { rating: self.rating, flag: self.flag, ..Edit::default() }
     }
 
-    /// Takes `from`'s Light, Color, Curves and Detail, for pasting one photo's look onto
-    /// another. Crop, rating and flag belong to the photo and stay as they are.
+    /// Takes `from`'s Light, Color, Selective Color, Black & White, Curves and Detail, for
+    /// pasting one photo's look onto another. Crop, rating and flag belong to the photo and stay
+    /// as they are.
     pub fn paste_look(&mut self, from: &Edit) {
         (self.light, self.color, self.curves, self.detail) = (from.light.clone(), from.color.clone(), from.curves.clone(), from.detail.clone());
+        (self.hsl, self.black_and_white) = (from.hsl.clone(), from.black_and_white.clone());
     }
 
     /// Only what a paste or a preset carries; crop, rating and flag neutral.
@@ -211,6 +217,97 @@ impl Curves {
     }
 }
 
+/// One colour band's Selective Color sliders, all −100..100.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Band {
+    pub hue: f32,
+    pub saturation: f32,
+    pub luminance: f32,
+}
+
+/// Selective Color: hue, saturation and luminance per colour band (`bands.rs`), in band order.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Hsl {
+    pub enabled: bool,
+    pub red: Band,
+    pub orange: Band,
+    pub yellow: Band,
+    pub green: Band,
+    pub aqua: Band,
+    pub blue: Band,
+    pub purple: Band,
+    pub magenta: Band,
+}
+
+impl Default for Hsl {
+    fn default() -> Self {
+        let b = Band::default();
+        Hsl { enabled: true, red: b, orange: b, yellow: b, green: b, aqua: b, blue: b, purple: b, magenta: b }
+    }
+}
+
+impl Hsl {
+    pub fn bands(&self) -> [Band; 8] {
+        [self.red, self.orange, self.yellow, self.green, self.aqua, self.blue, self.purple, self.magenta]
+    }
+
+    pub fn band_mut(&mut self, i: usize) -> &mut Band {
+        [&mut self.red, &mut self.orange, &mut self.yellow, &mut self.green, &mut self.aqua, &mut self.blue, &mut self.purple, &mut self.magenta]
+            .into_iter()
+            .nth(i)
+            .expect("one of the eight bands")
+    }
+
+    /// Whether no band is moved.
+    pub fn is_neutral(&self) -> bool {
+        self.bands().iter().all(|b| *b == Band::default())
+    }
+}
+
+/// Black and white, with a mixer: how bright each colour band comes out in grey, −100..100.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BlackAndWhite {
+    /// None is as the camera shot it: on for a RAF shot in a monochrome simulation, off for
+    /// everything else. So an unedited RAF in Acros opens in black and white with no edit file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on: Option<bool>,
+    pub red: f32,
+    pub orange: f32,
+    pub yellow: f32,
+    pub green: f32,
+    pub aqua: f32,
+    pub blue: f32,
+    pub purple: f32,
+    pub magenta: f32,
+}
+
+impl BlackAndWhite {
+    /// Whether the photo shows in black and white; `camera` is what the camera shot.
+    pub fn is_on(&self, camera: bool) -> bool {
+        self.on.unwrap_or(camera)
+    }
+
+    pub fn mix(&self) -> [f32; 8] {
+        [self.red, self.orange, self.yellow, self.green, self.aqua, self.blue, self.purple, self.magenta]
+    }
+
+    pub fn mix_mut(&mut self, i: usize) -> &mut f32 {
+        [&mut self.red, &mut self.orange, &mut self.yellow, &mut self.green, &mut self.aqua, &mut self.blue, &mut self.purple, &mut self.magenta]
+            .into_iter()
+            .nth(i)
+            .expect("one of the eight bands")
+    }
+
+    pub fn set_mix(&mut self, mix: [f32; 8]) {
+        for (i, v) in mix.into_iter().enumerate() {
+            *self.mix_mut(i) = v;
+        }
+    }
+}
+
 /// Detail. Definition is −100..100; the rest 0..100.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -294,6 +391,7 @@ mod tests {
     fn pasting_a_look_keeps_crop_rating_and_flag() {
         let mut from = Edit { rating: 5, flag: Flag::Pick, ..Edit::default() };
         (from.light.exposure, from.color.saturation, from.detail.sharpening, from.curves.enabled) = (0.5, 20.0, 40.0, false);
+        (from.hsl.blue.saturation, from.black_and_white.on, from.black_and_white.red) = (30.0, Some(true), 20.0);
         from.curves.red.insert([0.5, 0.6]);
         from.geometry.straighten = 3.0;
         let mut to = Edit { rating: 2, flag: Flag::Reject, ..Edit::default() };
@@ -302,7 +400,37 @@ mod tests {
         let before = to.clone();
         to.paste_look(&from);
         assert_eq!((&to.light, &to.color, &to.curves, &to.detail), (&from.light, &from.color, &from.curves, &from.detail));
+        assert_eq!((&to.hsl, &to.black_and_white), (&from.hsl, &from.black_and_white));
         assert_eq!((to.rating, to.flag, &to.geometry), (2, Flag::Reject, &before.geometry));
+    }
+
+    #[test]
+    fn selective_color_and_black_and_white_count_as_changes() {
+        let mut e = Edit::default();
+        e.hsl.band_mut(5).saturation = 10.0;
+        assert!(e.has_adjustments());
+        assert_eq!(e.hsl.blue.saturation, 10.0, "band 5 is Blue");
+        let mut e = Edit::default();
+        e.black_and_white.on = Some(false);
+        assert!(e.has_adjustments(), "turning a camera's black and white off is an edit");
+    }
+
+    #[test]
+    fn black_and_white_follows_the_camera_until_it_is_set() {
+        let mut bw = BlackAndWhite::default();
+        assert!(bw.is_on(true) && !bw.is_on(false));
+        bw.on = Some(false);
+        assert!(!bw.is_on(true));
+    }
+
+    #[test]
+    fn the_new_sections_read_from_their_own_tables_and_leave_the_switch_out_unset() {
+        let e: Edit = toml::from_str("[hsl]\norange = { saturation = -15, luminance = 10 }\n\n[black_and_white]\non = true\nblue = -60\n").expect("parses");
+        assert_eq!((e.hsl.orange.saturation, e.hsl.orange.luminance, e.hsl.orange.hue), (-15.0, 10.0, 0.0));
+        assert_eq!((e.black_and_white.on, e.black_and_white.blue), (Some(true), -60.0));
+        let written = toml::to_string(&Edit::default()).expect("writes");
+        assert!(!written.lines().any(|l| l.starts_with("on ")), "{written}");
+        assert_eq!(toml::from_str::<Edit>(&written).expect("reads back"), Edit::default());
     }
 
     #[test]

@@ -15,6 +15,7 @@ mod jobs;
 mod library;
 mod photo;
 mod presets;
+mod previews;
 mod raw;
 mod shortcuts;
 mod theme;
@@ -130,6 +131,8 @@ struct State {
     crop_start: Option<[f32; 4]>,
     /// The active picker: the next click on the photo sets something from that pixel.
     picker: Option<Pick>,
+    /// The Selective Color band whose sliders show.
+    band: usize,
     /// A pixel the compositor should probe: (request id, photo pixel).
     probe_request: Option<(u64, [u32; 2])>,
     /// The curve picker the outstanding probe is for, by request id.
@@ -673,6 +676,7 @@ fn init() -> State {
         crop_aspect: None,
         crop_start: None,
         picker: None,
+        band: 0,
         probe_request: None,
         probe_for: None,
         next_probe: 1,
@@ -925,6 +929,7 @@ impl Compositor<State> for Preview {
                 gpu.display_p3 = settings.display_p3;
                 gpu.detail_scale = prepared.detail_scale;
                 gpu.as_shot = prepared.as_shot;
+                gpu.camera_black_and_white = prepared.camera_black_and_white;
                 gpu.set_photo(f.device, f.queue, u64::MAX - index as u64, prepared.size, prepared.pixels.source());
                 gpu.update(f.device, f.queue, &prepared.edit);
                 let g = &prepared.edit.geometry;
@@ -947,7 +952,8 @@ impl Compositor<State> for Preview {
                 gpu
             });
             gpu.detail_scale = prepared.detail_scale;
-                gpu.as_shot = prepared.as_shot;
+            gpu.as_shot = prepared.as_shot;
+            gpu.camera_black_and_white = prepared.camera_black_and_white;
             gpu.set_photo(f.device, f.queue, 0, prepared.size, prepared.pixels.source());
             gpu.update(f.device, f.queue, &prepared.edit);
             let g = &prepared.edit.geometry;
@@ -969,6 +975,7 @@ impl Compositor<State> for Preview {
             if develop.photo_id() != Some(s.photo.id) {
                 develop.set_photo(f.device, f.queue, s.photo.id, s.photo.size, s.photo.pixels.source());
                 develop.as_shot = s.photo.as_shot;
+                develop.camera_black_and_white = s.photo.camera_black_and_white;
             }
             if let Some((id, pixel)) = s.probe_request.take() {
                 develop.probe(id, pixel);
@@ -985,6 +992,7 @@ impl Compositor<State> for Preview {
                 gpu.histogram_enabled = false;
                 gpu.detail_scale = decoded.detail_scale;
                 gpu.as_shot = s.photo.as_shot;
+                gpu.camera_black_and_white = s.photo.camera_black_and_white;
                 gpu.set_photo(f.device, f.queue, s.photo.id, decoded.size, pixels.source());
                 *full = Some(gpu);
             }
@@ -1098,6 +1106,19 @@ fn main() {
             ("warm", |s: &mut State| {
                 develop_scene(s);
                 s.edit.color.temperature = 70.0;
+            }),
+            // Selective Color: blues deeper and turned towards aqua, greens lighter, Blue chosen.
+            ("selective", |s: &mut State| {
+                develop_scene(s);
+                s.edit.hsl.blue = darkroom_core::Band { hue: -60.0, saturation: 50.0, luminance: -30.0 };
+                s.edit.hsl.green.luminance = 60.0;
+                s.band = 5;
+            }),
+            // Black and white through the red filter.
+            ("mono", |s: &mut State| {
+                develop_scene(s);
+                s.edit.black_and_white.on = Some(true);
+                s.edit.black_and_white.set_mix([45.0, 35.0, 10.0, -20.0, -35.0, -65.0, -30.0, 0.0]);
             }),
             ("crop", |s: &mut State| {
                 develop_scene(s);

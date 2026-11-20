@@ -9,13 +9,14 @@ Browse a folder, edit with Apple Photos-style adjustments plus proper RGB curves
 | What | Where |
 | --- | --- |
 | v1 feature spec | [Claude Doc](https://claude.ai/artifact/BNANWQoV2ctnippxEAnmz3) |
+| v2 spec: HSL and black & white | [Claude Doc](https://claude.ai/artifact/M9ZwpG5JHmXRs4cvaYT77L) |
 | Design system ("Darkroom") | [Design system](https://claude.ai/artifact/2AketXsxSQns3vJyx2HrM3): `tokens.json` is the source of truth |
 | v1 screens | [Design canvas](https://claude.ai/artifact/6f6zNFTt3oJi4M5i7UsryE) |
 | RUNE | https://github.com/anomalyco/rune (pre-release, pin a `dev` git rev) |
 
 ## Status
 
-Phase: **implementation.** Every v1 area has a working first version. What follows is what's built, what isn't, what's built but known to be wrong, and what nobody has tried on real files yet. Last brought up to date 2026-11-18.
+Phase: **implementation.** Every v1 area has a working first version, and v2 has begun with Selective Color and Black & White. What follows is what's built, what isn't, what's built but known to be wrong, and what nobody has tried on real files yet. Last brought up to date 2026-11-20.
 
 ### Built
 
@@ -25,13 +26,15 @@ Phase: **implementation.** Every v1 area has a working first version. What follo
 | Edit files | `.darkroom` beside each photo: read on open, written on slider release, removed when the edit is empty |
 | Light | Exposure, Brilliance, Highlights, Shadows, Brightness, Contrast, Black point. Brilliance, Highlights and Shadows act on regions, not single pixels |
 | Color | Saturation, Vibrance, Temperature, Tint; a neutral-point picker (the eyedropper in the section header) sets Temperature and Tint from a click on the photo |
+| Selective Color | Eight colour bands (Red, Orange, Yellow, Green, Aqua, Blue, Purple, Magenta), each with Hue, Saturation and Luminance, in Oklab. A swatch per band chooses whose sliders show, with a dot under any band that's moved; the eyedropper in the header chooses the band of a clicked colour. Bands blend smoothly into each other and leave greys alone. Off (dimmed, with a note) while the photo is black and white. [v2 spec](https://claude.ai/artifact/M9ZwpG5JHmXRs4cvaYT77L) |
+| Black & White | A switch in the section header; a mixer with one slider per colour band setting how light that colour comes out in grey; Yellow, Orange, Red and Green filter buttons that set the mixer. Every pixel comes out with R = G = B, in the preview and in export. A RAF shot in a monochrome simulation keeps its colour at decode and opens with the switch on, with no edit file; turning it off shows the colour |
 | Curves | RGB, R, G, B: add, drag and remove points (double-click); live histogram behind; the RGB curve applies to the channels or to luminance only ("Apply to", on the RGB tab), which keeps hue and saturation; black, grey and white point pickers on the photo. Every picker shows the pixel's R G B beside the pointer; Esc puts it down |
 | Detail | Definition, Sharpening, Noise reduction, Vignette; same reach at any render size |
 | Sliders | Drag; double-click the track or the label to reset; click the value to type one (Return or a click elsewhere sets it, Esc cancels) |
 | Sections | The eye icon hides or shows a section's edits; Reset all |
 | Before/after | Split view from the top-bar button or `Y`: the original left of a line across the photo, the edit right of it, both through the crop; drag the line to move it. Holding `\` shows the whole original |
-| Copy/paste edits | "Copy edits" and "Paste" under the panel in Develop, or ⇧⌘C and ⇧⌘V there and in the Library, where paste goes onto every selected photo. Paste replaces Light, Color, Curves and Detail and keeps each photo's own crop, rating and flag; one undo step a photo |
-| Presets | The Presets section at the bottom of Develop's panel: "Save preset…" keeps the photo's Light, Color, Curves and Detail under a typed name (Return saves, Esc cancels; a taken or unusable name says why under the field); a click on a name puts that look on the photo as one undo step, keeping its crop, rating and flag; the preset matching the photo's look is lit; the cross deletes after a confirm. Kept as one TOML file each in `~/Library/Application Support/darkroom/presets`, never overwritten |
+| Copy/paste edits | "Copy edits" and "Paste" under the panel in Develop, or ⇧⌘C and ⇧⌘V there and in the Library, where paste goes onto every selected photo. Paste replaces Light, Color, Selective Color, Black & White, Curves and Detail and keeps each photo's own crop, rating and flag; one undo step a photo |
+| Presets | The Presets section at the bottom of Develop's panel: "Save preset…" keeps the photo's Light, Color, Selective Color, Black & White, Curves and Detail under a typed name (Return saves, Esc cancels; a taken or unusable name says why under the field); a click on a name puts that look on the photo as one undo step, keeping its crop, rating and flag; the preset matching the photo's look is lit; the cross deletes after a confirm. Kept as one TOML file each in `~/Library/Application Support/darkroom/presets`, never overwritten |
 | Undo/redo | ⌘Z and ⇧⌘Z, or the arrows in the top bar, in Develop. One step per finished change (a slider drag, a curve point, a crop, a reset); each photo keeps its steps until the app quits |
 | Histogram | Live from the GPU, at the top of the panel, with the photo's aperture, shutter, ISO and focal length under it |
 | Clipping warnings | The histogram's two squares paint crushed shadows blue and blown highlights red over the photo. Preview only; exports never carry them |
@@ -54,7 +57,8 @@ Phase: **implementation.** Every v1 area has a working first version. What follo
 | Export | JPEG, PNG, 16-bit TIFF; long-edge resize; sRGB or Display P3 with ICC profile; camera info without location; one photo, the Library's selection, or everything shown; progress and failures listed |
 | Releases | `scripts/tag.sh` bumps the version, tests, commits and tags; a pushed tag builds a macOS `.dmg`, a Linux AppImage and a Windows `.msi` (plus bare `.tar.gz` and `.zip`) on GitHub Actions and publishes them as a release, each with the design system's app icon (see "Releasing") |
 | RAF | Developed with `rawler` to linear floats; thumbnails and EXIF from the embedded JPEG |
-| RAF starting look | An unedited RAF starts as the camera rendered it: a tone curve and a chroma curve are fitted per photo against the embedded JPEG, so the film simulation, dynamic range and tone settings carry over, and the edit file stays empty. A black-and-white simulation (from the MakerNote) starts in black and white. Highlights the JPEG clipped roll off under white, so they stay recoverable |
+| RAF preview cache | A RAF's developed 2560 px preview is kept in `~/Library/Caches/darkroom/previews`, so a RAF opened before opens in under a second (a headless run took 5.2 s the first time, 0.8 s the second, on an X-T4 sample in a debug build) and looks exactly the same (the snapshots were byte for byte equal). A changed file (new size or modification time) or a new app version is developed again. The folder is kept under 2 GB, least recently opened first out |
+| RAF starting look | An unedited RAF starts as the camera rendered it: a tone curve and a chroma curve are fitted per photo against the embedded JPEG, so the film simulation, dynamic range and tone settings carry over, and the edit file stays empty. A black-and-white simulation (from the MakerNote) starts with Black & White on, its colour kept for the mixer. Highlights the JPEG clipped roll off under white, so they stay recoverable |
 
 ### Not built
 
@@ -83,8 +87,9 @@ Design column: ✅ designed on the canvas · ◐ partly · ✗ not designed · n
 - **Local tone speed is unmeasured:** five extra quarter-size passes per edit change while Brilliance, Highlights or Shadows are set, and five more for Definition. Not timed on a 26 MP photo or during a drag.
 - **Sharpening raises noise** in flat areas (sd 7 → 11 at 80 on the noisy test image). Wants a masking control.
 - **Film simulation names are mostly unseen:** the tag numbers and values come from ExifTool's Fujifilm table, and the names are written as the X series' menus have them, from memory ("Shade", "Fluorescent 1", "Auto, ambience priority", "Eterna Bleach Bypass"). Only one camera file was read (an X-T4: Provia, grain off, color chrome off, DR100, auto white balance); every other value was seen only on a copy of that file with the numbers changed by hand. A value not in the table shows no row. Color Chrome FX Blue, a Kelvin white balance's number and the older cameras' portrait modes aren't shown. The info panel's label column is 88 pt, set so "Dynamic range" and the exposure line both fit; a longer lens name or exposure line would run out of the panel.
-- **RAF look is tone and chroma only:** a simulation's hue shifts aren't fitted. On five downloaded samples (four Provia and a Classic Chrome on X-T3, X-T4, X-T5, X-Pro3; DR100) the middle of the picture comes within about 1–4 of 255 levels of the camera's JPEG at each luminance percentile, and within a few thousandths in Oklab chroma. On a Velvia sample (X100V) reds come out magenta where the camera's go orange, the sky is paler, and shadows sit 6–8 levels high. The deepest highlights come out up to about 10 levels darker than the camera's (the roll-off is gentler than its clipping). No black-and-white, Sepia, DR200 or DR400 sample has been tried; black and white is tested on generated data only, and Sepia's tint is lost (it comes out as low colour, untoned). The JPEG must have the raw's proportions, or the fixed base tone (gain 1.8, shoulder 0.7, fitted to one X-T4 sample) stands in, as it does for a RAF with no JPEG. Fujifilm cameras can write the JPEG in Adobe RGB; that case is read as sRGB.
-- **RAF speed:** about 4–5 s to open a 26 MP RAF in a debug build, 1.5 s of it the look's fit and apply (measured on an X-T4 sample, whole run including the headless frame). Developed again on every open.
+- **RAF look is tone and chroma only:** a simulation's hue shifts aren't fitted. On five downloaded samples (four Provia and a Classic Chrome on X-T3, X-T4, X-T5, X-Pro3; DR100) the middle of the picture comes within about 1–4 of 255 levels of the camera's JPEG at each luminance percentile, and within a few thousandths in Oklab chroma. On a Velvia sample (X100V) reds come out magenta where the camera's go orange, the sky is paler, and shadows sit 6–8 levels high. The deepest highlights come out up to about 10 levels darker than the camera's (the roll-off is gentler than its clipping). No black-and-white, Sepia, DR200 or DR400 sample has been tried; a black-and-white RAF opening with the switch on is tested in unit tests only (params and the camera look's fit), never on a file, and Sepia's tint is lost (it comes out as low colour, untoned). The JPEG must have the raw's proportions, or the fixed base tone (gain 1.8, shoulder 0.7, fitted to one X-T4 sample) stands in, as it does for a RAF with no JPEG. Fujifilm cameras can write the JPEG in Adobe RGB; that case is read as sRGB.
+- **RAF speed:** about 4–5 s to open a 26 MP RAF the first time in a debug build, 1.5 s of it the look's fit and apply (measured on an X-T4 sample, whole run including the headless frame). Opened again it comes from the preview cache. 100% and export still develop the RAF in full every time, and so does an edited RAF's thumbnail.
+- **RAF preview cache:** each preview is about 26 MB for a 26 MP photo (stored as the half floats themselves, uncompressed, so it reads back exact), so the 2 GB limit holds about 80; the limit is a guess. A preview whose RAF changed or moved stays until the limit pushes it out. A change to how a RAF is developed (`raw.rs`, `camera_look.rs`) must bump `FORMAT` in `previews.rs`, or previews already cached keep showing the old look until the version changes. Writing the preview adds a 26 MB write to the first open, untimed on its own.
 - **RAF hot pixels:** isolated bright pixels at 100%; the camera maps them out, nothing here does.
 - **Undo history:** lost on quit, and capped at 200 steps a photo. Rating and flag changes aren't steps. The top-bar arrows have no tooltip and their icons don't brighten on hover as the design's do.
 - **Curves' luminance mode is undesigned:** the "Apply to: Channels / Luminance" switch is built in the panel's style, without a design, and shows only on the RGB tab. Luminance is scaled in linear light, so a saturated colour pushed up can go past white in one channel and is then brought in by the output step (as Light's tone is). On the test chart's hue bar an S curve shifted hue by at most 0.5° in this mode against 3.8° on the channels; greys come out the same either way. Generated chart only.
@@ -99,7 +104,10 @@ Design column: ✅ designed on the canvas · ◐ partly · ✗ not designed · n
 - **Presets are Develop only and undesigned:** built without a design, in the panel's style. No applying a preset to the Library's selection, no rename, no updating a preset with a new look (delete and save again), no folders of presets. The folder is read at launch and after a save or delete, so a file added in Finder shows on the next launch. A deleted preset is gone (no undo, no Trash). A preset file that doesn't parse is skipped and named in the status line, and only the first such file is named. Preset files are written in full, like edit files. The section sits below Detail, so it is off screen until the panel is scrolled.
 - **Folder watching leaves the open photo alone:** a photo open in Develop that is replaced on disk keeps showing the old pixels until it is opened again; one that is deleted stays open, and editing it writes an edit file for a photo that is gone. Edit files changed by another app (a sync, another Mac) aren't picked up until the folder is opened again, since Darkroom's own saves are ignored by name. Every change reads the whole folder again (EXIF and edit file of every photo) and scans the whole tree; untimed on a large folder or tree. A photo still being copied may get no thumbnail until the copy's last change comes in. A watch that can't start says so in Develop's status line only. Only the library folder itself is looked for every 2 s; FSEvents says nothing when a drive under a watch is ejected, so a subfolder that goes with it is noticed only through its library folder. The folder tree doesn't mark a missing folder, where the design does.
 - **Linux and Windows builds are macOS-shaped:** exports there carry no ICC profile (it is read from `/System/Library/ColorSync`), so a Display P3 export is mislabelled as untagged; the thumbnail cache and presets go under `$HOME/Library/...` (on Windows, where `HOME` is usually unset, into the temp folder); the top bar leaves room for macOS's traffic lights. Releases are unsigned on every platform. The Windows `.exe` itself carries no icon (the installer, its Start menu shortcut and Add or Remove Programs do), and the installer has no dialogs beyond Windows' own progress window: no licence page, no choice of folder. The AppImage bundles no libraries, so it needs the system's `libxkbcommon` (every desktop session has it) and glibc 2.39 or newer (Ubuntu 24.04, Debian 13, Fedora 40 and later), from the runner it is built on. The app icon fills its square to the edges, where macOS's own icons leave a margin, so it looks a little larger than its neighbours in the Dock.
-- **Verbose edit files:** reading is sparse (missing fields are neutral), but saving writes every field, so a rating alone produces a full file.
+- **Verbose edit files:** reading is sparse (missing fields are neutral), but saving writes every field, so a rating alone produces a full file. Selective Color adds a table per band, eight of them, to every file; the v2 spec's example shows them left out at 0, which saving doesn't do yet.
+- **Selective Color's numbers are guesses:** the band centres (Oklab hue 29, 60, 105, 142, 195, 258, 294, 328°) come from measuring sRGB's primaries, skin and a sky; the grey fade-out (full effect from chroma 0.04) and Luminance's reach (±0.5 in Oklab lightness's exponent, about ±1.5 stops) were set without a photo. Hue ±100 turns a band 60% of the way to its neighbour's centre, not all the way as the spec proposes: further, the turn falls off faster than hue rises and the hue bar folds into a hard edge (Blue −60 did, at 100%). Two neighbours turning towards each other are both cut back for the same reason. On the test chart's hue bar the largest step between neighbouring pixels with Blue at −60/+50/−30 is 6 levels, a steep ramp where blue meets purple, not a jump.
+- **Selective Color and Black & White are undesigned:** built in the panel's style. The swatch row, the header switch (`ui::switch`) and the band colours (`theme::BANDS`, not in the design system) are new. The mixer's sliders are plain, where the spec has a track in the band's colour. The band eyedropper reads the photo as decoded, before any edit, and shows the curve pickers' RGB readout, not a swatch. No dragging on the photo to change a colour.
+- **The black-and-white mixer is a guess too:** ±100 multiplies Oklab lightness by 2^±0.75 (about ±2.25 stops), and the four filters' settings are guesses at what each filter does, not measured against film. On a generated sky, foliage, skin and red scene the Red filter took the sky from 140 to 87 and red from 113 to 156, but skin from 185 to 237, lighter than a red filter on film likely makes it. The grey is Oklab lightness, which isn't how the camera's Acros or Monochrome makes its grey; on a RAF shot that way, the start will differ from the camera's JPEG by an unmeasured amount.
 - **Preview is 8-bit sRGB:** RUNE has no known path for high-bit-depth or P3 output of app-supplied images. Processing is float and exports are unaffected.
 - **TIFF exports carry no camera info.**
 
@@ -116,6 +124,7 @@ Everything was built against generated test images and six RAFs downloaded from 
 - 100% on a real 26 MP JPEG or a RAF: only a generated 5400 × 3600 PNG so far
 - Holding `\` on a real keyboard (key repeat, a layout where `\` needs a modifier), ⇧⌘C and ⇧⌘V from real keys, and the before/after button's tooltip: scripted key events only
 - Curves' luminance mode on a real photo (skin, foliage, a saturated sky)
+- Selective Color and Black & White on any real photo: the test chart and one generated four-colour PNG (scripted eyedropper, switch, Red filter and a JPEG export) only. A RAF shot in Acros or Monochrome: none was available
 - The split view's line dragged with a real mouse or trackpad, and the split on a real photo or a RAF, at Fit or 100%: scripted clicks, keys and one drag on the test chart only
 - Panning with a real trackpad or mouse wheel (scripted drag and wheel events only)
 - Local tone (Brilliance, Highlights, Shadows) and Definition on any real photo: only a generated backlit scene so far
@@ -124,6 +133,7 @@ Everything was built against generated test images and six RAFs downloaded from 
 - Clipping warnings on a real photo and at 100%: the test chart at Fit only
 - Film simulation names on the user's own cameras and settings: six downloaded RAFs (Provia, Classic Chrome, Velvia) so far
 - ⌘-click, ⇧-click and ⌘A from a real mouse and keyboard: scripted clicks with held modifiers only, on six generated PNGs
+- The RAF preview cache reaching its 2 GB limit, and on the user's own RAFs: one sample opened twice so far
 - Thumbnail speed on a folder of 26–40 MP files (first visit decodes each one)
 - Noise reduction at full size on a noisy high-ISO photo (the taps are spread apart for export; only seen on ISO 160)
 - Slider drag speed with noise reduction on (81 taps per pixel)
@@ -141,7 +151,7 @@ cargo run -p darkroom -- path/to/folder          # browse a folder (not remember
 cargo run -p darkroom -- path/to/photo.jpg       # open a photo in Develop (or a .RAF)
 cargo run -p darkroom -- --snap out.png --scene edited   # headless snapshot, no window
 # DARKROOM_NO_PREFS=1 ignores saved settings (root folder, thumbnail size), for tests
-# Develop scenes on the test chart: develop, edited, curves, curve-luma, curve-red, extreme, warm, hidden, original, split, clipping, definition, sharpen, denoise, crop, cropped, zoom, picking, presets
+# Develop scenes on the test chart: develop, edited, curves, curve-luma, curve-red, extreme, warm, selective, mono, hidden, original, split, clipping, definition, sharpen, denoise, crop, cropped, zoom, picking, presets
 # (the detail scenes need a photo with texture and noise to show anything)
 # the panel scrolls; for the Curves section in a snapshot add --size 1280x1500
 # drive it: --script events.json (clicks and drags in window points, or "key": an element's key)
@@ -203,7 +213,7 @@ Per pixel, in order:
 2. **White balance:** per-channel multipliers, normalized so white keeps its luminance.
 3. **Exposure:** a multiplier, 2^stops.
 4. **Light:** black point per channel in linear light. Then tone on perceptually encoded luminance; the channels are scaled by the luminance ratio, so hue holds. Brilliance, Highlights and Shadows are local: the brightness of the pixel's region (the edge-aware base) moves along the tone curve and the pixel keeps its distance from it, so a lifted shadow keeps its texture. Black and white stay fixed. Brightness and Contrast are global curves.
-5. **Color:** Saturation and Vibrance scale chroma in Oklab, at constant hue and lightness.
+5. **Color:** Saturation and Vibrance scale chroma in Oklab, at constant hue and lightness. Then Selective Color (`darkroom-core/src/bands.rs`): each pixel belongs to the two colour bands either side of its Oklab hue, by a raised cosine, and takes their hue turn, chroma scale and lightness change, faded out towards grey. Or, when black and white is on (it replaces Selective Color), the pixel's Oklab lightness moved by its bands' mixer settings becomes L³ in all three channels, written straight through the output step so the channels stay exactly equal.
 6. **Curves:** composite then per-channel, on display (sRGB-primary) channels in perceptual encoding. In the luminance mode the composite curve maps encoded luminance instead and the channels are scaled by the ratio, so hue and saturation hold. Lookup tables come from `Curve::lut`.
 7. **Detail:**
    - **Noise reduction:** in its own pass, before the others.
@@ -257,7 +267,7 @@ How it runs: one photo at a time. A background thread decodes the full image and
 
 - **Starting look:** the camera's, fitted per photo against the JPEG it embedded (`darkroom-core/src/camera_look.rs`). The two can't be compared pixel by pixel, because the camera corrects lens distortion and vignetting in its JPEG and the raw is uncorrected. They are compared by distribution instead, over the middle 60% of each, shrunk to 512 px: the raw's n-th percentile of luminance becomes the JPEG's n-th percentile, which gives a tone curve, and the same for Oklab chroma in the midtones gives a chroma curve. A curve and not one scale, because the camera lifts muted colour (foliage) far more than strong colour (a colour chart). The tone curve is applied to luminance as a ratio, so hue holds; past the JPEG's clipping it rolls off towards white. The MakerNote's black-and-white simulations take all the colour out. The result is baked into the decoded pixels, so every slider at 0 is the camera's look. Without a usable JPEG, a fixed base tone stands in (gain 1.8, shoulder over 0.7; fitted to one X-T4 sample, a guess).
 - **Thumbnails and EXIF** come from the JPEG the camera embeds in every RAF (`darkroom-core/src/raf.rs`), so an unedited RAF shows the camera's rendering in the grid, not Darkroom's. Once edited, its thumbnail is Darkroom's.
-- **Speed:** a 26 MP RAF takes about 4–5 s to open in a debug build. The look's apply runs on every core. Each open develops it again; nothing is cached.
+- **Speed:** a 26 MP RAF takes about 4–5 s to open the first time in a debug build. The look's apply runs on every core. The developed preview is then cached (`crates/darkroom/src/previews.rs`), keyed by the file's path, size and modification time and the app's version, so the next open reads it back instead.
 - **rawler in debug builds:** its demosaic relies on wrapping arithmetic, so the root `Cargo.toml` turns overflow checks off for that one package.
 
 ## Library
@@ -306,6 +316,7 @@ Everything on the list is on the canvas now (2026-11-18), apart from:
 
 - New icons in the design system: eyedropper, folder, flip and swap orientation (the cross is the system's `close.svg`). The SVGs are drawn as the canvas has them inline; they aren't uploaded yet
 - A settings screen, if one is ever needed
+- Selective Color and Black & White (v2): both sections, the band swatches and their colours, the header switch, the band eyedropper's readout, and Selective Color dimmed while black and white is on. Built without designs (2026-11-20); the spec's "Designs needed" table lists them
 
 ### Decisions
 
@@ -323,16 +334,17 @@ Made:
 - **Detail reach:** in preview pixels, scaled per render.
 - **Undo model:** per-photo history in memory (`darkroom-core/src/history.rs`), whole edits, nothing in the edit file.
 - **Edited thumbnails:** rendered through the develop pipeline, once per edit, when the photo is left.
+- **RAF preview:** cache the developed preview on disk, bounded by size, rather than show the embedded JPEG first and swap.
+- **Selective Color and Black & White** (the v2 spec's open questions, taken at its recommendations since they weren't answered): the mixer works by the eight colour bands, not by red, green and blue; eight bands, not Apple Photos' six; the section is named Selective Color; a RAF shot in black and white opens with the switch on through a missing setting (as the camera shot it), not one written into its edit file.
 - **Edge-aware base:** a guided filter (He, Sun, Tang 2010) on quarter-size luminance, guided by itself. One set of passes serves Brilliance, Highlights, Shadows and Definition.
 
 Open:
 
-- **RAF preview:** cache the developed preview, or show the embedded JPEG first and swap.
 - **Exposure headroom:** values over white survive to the output step and are then mapped into SDR. An EDR preview would need a float display path.
 - **Thumbnail cache:** it lives in `~/Library/Caches/darkroom/thumbs` with no size limit or cleanup.
 
 ## Later (v2+)
 
-HSL / selective color, masks and local adjustments, healing and clone, LUTs, black & white with a channel mixer, lens correction for RAF, virtual copies, HDR/EDR preview.
+Masks and local adjustments, healing and clone, LUTs, lens correction for RAF, virtual copies, HDR/EDR preview.
 
 Not planned: catalog database, Apple Photos integration, HEIC, cloud sync, printing, plugins.

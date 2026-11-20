@@ -5,10 +5,16 @@ struct Params {
     white_balance: vec4<f32>, // r, g, b multipliers
     light: vec4<f32>,         // exposure multiplier, black point, brilliance, highlights
     tone: vec4<f32>,          // shadows, brightness, contrast
-    color: vec4<f32>,         // saturation, vibrance
+    color: vec4<f32>,         // saturation, vibrance, Selective Color (1 on), black and white (1 on)
     effects: vec4<f32>,       // vignette, curves (0 off, 1 on, 2 on with the composite on luminance), probe x, probe y
     detail: vec4<f32>,        // definition (−1..1), sharpening, noise reduction (0..1), the base's window radius in quarter-size pixels
     output: vec4<f32>,        // x: 1 for Display P3 output, 0 for sRGB; y: detail scale (pixels here per preview pixel)
+    // Per colour band, in band order (bands.rs), four to a vec4:
+    band_hue: array<vec4<f32>, 2>,        // hue turn, radians
+    band_saturation: array<vec4<f32>, 2>, // chroma scale less 1
+    band_luminance: array<vec4<f32>, 2>,  // lightness exponent, base 2
+    band_mix: array<vec4<f32>, 2>,        // black-and-white mixer: lightness exponent, base 2
+    band_centres: array<vec4<f32>, 2>,    // Oklab hue, radians
 }
 
 const LUMA: vec3<f32> = vec3<f32>(0.2627, 0.6780, 0.0593); // Rec.2020
